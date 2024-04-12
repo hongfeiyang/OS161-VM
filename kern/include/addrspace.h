@@ -34,12 +34,10 @@
  * Address space structure and operations.
  */
 
-
 #include <vm.h>
 #include "opt-dumbvm.h"
 
 struct vnode;
-
 
 /*
  * Address space - data structure associated with the virtual memory
@@ -48,17 +46,56 @@ struct vnode;
  * You write this.
  */
 
+#define L1_BITS 11
+#define L2_BITS 9
+#define OFFSET_BITS 12
+
+#define L1_INDEX(x) ((x) >> (L2_BITS + OFFSET_BITS))
+#define L2_INDEX(x) (((x) >> OFFSET_BITS) & ((1 << L2_BITS) - 1))
+
+#define YANG_VM_STACKPAGES 18
+
+struct region {
+    vaddr_t vbase;
+    size_t npages;
+    vaddr_t vtop; // for convenience
+    unsigned int readable : 1;
+    unsigned int writeable : 1;
+    unsigned int executable : 1;
+    struct region *next;
+};
+
+// How many pages are we going to have for one page table?
+
+typedef struct page_table_entry {
+    paddr_t frame;
+} PTE; // total 32 bits
+
+typedef struct l2_page_table {
+    PTE *entries[1 << L2_BITS];
+} L2Table;
+// A second-level page table has 1 << 9 = 512 entries
+// Each entry is 4 bytes, so 512 * 4 = 2KB
+
+typedef struct page_table {
+    L2Table *tables[1 << L1_BITS]; // Pointers to second-level page tables
+} PageTable;
+// A first level page table has 1 << 11 = 2048 entries
+// Each entry is 4 bytes, so 2048 * 4 = 8KB
+
 struct addrspace {
 #if OPT_DUMBVM
-        vaddr_t as_vbase1;
-        paddr_t as_pbase1;
-        size_t as_npages1;
-        vaddr_t as_vbase2;
-        paddr_t as_pbase2;
-        size_t as_npages2;
-        paddr_t as_stackpbase;
+    vaddr_t as_vbase1;
+    paddr_t as_pbase1;
+    size_t as_npages1;
+    vaddr_t as_vbase2;
+    paddr_t as_pbase2;
+    size_t as_npages2;
+    paddr_t as_stackpbase;
 #else
-        /* Put stuff here for your VM system */
+    struct region *regions;
+    bool force_readwrite;
+    PageTable *page_table;
 #endif
 };
 
@@ -104,20 +141,19 @@ struct addrspace {
  */
 
 struct addrspace *as_create(void);
-int               as_copy(struct addrspace *src, struct addrspace **ret);
-void              as_activate(void);
-void              as_deactivate(void);
-void              as_destroy(struct addrspace *);
+int as_copy(struct addrspace *src, struct addrspace **ret);
+void as_activate(void);
+void as_deactivate(void);
+void as_destroy(struct addrspace *);
 
-int               as_define_region(struct addrspace *as,
-                                   vaddr_t vaddr, size_t sz,
-                                   int readable,
-                                   int writeable,
-                                   int executable);
-int               as_prepare_load(struct addrspace *as);
-int               as_complete_load(struct addrspace *as);
-int               as_define_stack(struct addrspace *as, vaddr_t *initstackptr);
-
+int as_define_region(struct addrspace *as,
+                     vaddr_t vaddr, size_t sz,
+                     int readable,
+                     int writeable,
+                     int executable);
+int as_prepare_load(struct addrspace *as);
+int as_complete_load(struct addrspace *as);
+int as_define_stack(struct addrspace *as, vaddr_t *initstackptr);
 
 /*
  * Functions in loadelf.c
@@ -127,6 +163,5 @@ int               as_define_stack(struct addrspace *as, vaddr_t *initstackptr);
  */
 
 int load_elf(struct vnode *v, vaddr_t *entrypoint);
-
 
 #endif /* _ADDRSPACE_H_ */
