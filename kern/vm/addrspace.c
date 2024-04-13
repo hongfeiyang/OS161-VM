@@ -72,6 +72,10 @@ page_table_destroy(PageTable *page_table) {
         if (page_table->tables[i] != NULL) {
             for (int j = 0; j < 1 << L2_BITS; j++) {
                 if (page_table->tables[i]->entries[j] != NULL) {
+                    // Free the frame
+                    paddr_t frame = page_table->tables[i]->entries[j]->frame;
+                    vaddr_t page = PADDR_TO_KVADDR(frame & PAGE_FRAME);
+                    free_kpages(page);
                     kfree(page_table->tables[i]->entries[j]);
                     page_table->tables[i]->entries[j] = NULL;
                 }
@@ -115,9 +119,7 @@ page_table_copy(PageTable *old) {
                     // copy the contents of the old frame to the new frame
                     memcpy((void *)new_page, (void *)PADDR_TO_KVADDR(old->tables[i]->entries[j]->frame & PAGE_FRAME), PAGE_SIZE);
 
-                    // copy the contents of the old frame to the new frame
                     // we have the offset of the old frame, we need to copy offset bits to combine with the new frame address bits
-
                     paddr_t new_paddr = KVADDR_TO_PADDR(new_page);
                     paddr_t old_paddr = old->tables[i]->entries[j]->frame;
 
@@ -217,21 +219,6 @@ free_region(struct region *region) {
     kfree(region);
 }
 
-// static void
-// print_page_table(PageTable *page_table) {
-//     kprintf("Printing page table\n");
-//     for (int i = 0; i < 1 << L1_BITS; i++) {
-//         if (page_table->tables[i] != NULL) {
-//             for (int j = 0; j < 1 << L2_BITS; j++) {
-//                 if (page_table->tables[i]->entries[j] != NULL) {
-//                     kprintf("L1: %d, L2: %d \t\t vaddr: %x --> paddr: %x\n", i, j, (i << (L2_BITS + OFFSET_BITS)) + (j << OFFSET_BITS), page_table->tables[i]->entries[j]->frame);
-//                 }
-//             }
-//         }
-//     }
-//     kprintf("End of page table\n");
-// }
-
 static void
 flush_tlb(void) {
     int spl = splhigh();
@@ -299,8 +286,6 @@ as_destroy(struct addrspace *as) {
     /*
      * Clean up as needed.
      */
-
-    // print_page_table(as->page_table);
 
     free_region(as->regions);
     as->regions = NULL;
