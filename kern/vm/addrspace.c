@@ -112,17 +112,17 @@ page_table_copy(PageTable *old) {
                         page_table_destroy(new);
                         return NULL;
                     }
+                    // copy the contents of the old frame to the new frame
+                    memcpy((void *)new_page, (void *)PADDR_TO_KVADDR(old->tables[i]->entries[j]->frame & PAGE_FRAME), PAGE_SIZE);
 
                     // copy the contents of the old frame to the new frame
                     // we have the offset of the old frame, we need to copy offset bits to combine with the new frame address bits
 
                     paddr_t new_paddr = KVADDR_TO_PADDR(new_page);
                     paddr_t old_paddr = old->tables[i]->entries[j]->frame;
-                    // copy the contents of the old frame to the new frame
-                    memmove((void *)PADDR_TO_KVADDR(new_paddr), (const void *)PADDR_TO_KVADDR(old_paddr), PAGE_SIZE);
 
                     // copy offset bits
-                    new->tables[i]->entries[j]->frame = new_paddr | (old_paddr & ~PAGE_FRAME);
+                    new->tables[i]->entries[j]->frame = new_paddr | (old_paddr & (~PAGE_FRAME));
 
                 } else {
                     new->tables[i]->entries[j] = NULL;
