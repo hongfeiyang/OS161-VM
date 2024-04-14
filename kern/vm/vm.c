@@ -152,6 +152,16 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
         return EFAULT;
     }
 
+    /* now check if we receive a read fault on a non-readable page */
+    if (!current_region->readable && faulttype == VM_FAULT_READ) {
+        return EFAULT;
+    }
+
+    /* now check if we receive a write fault on a read-only page, with forced write off */
+    if (!current_region->writeable && !as->force_readwrite && faulttype == VM_FAULT_WRITE) {
+        return EFAULT;
+    }
+
     /*
      * At this point we know this is in a valid region, we need to allocate a page and add it to the page table
      */
