@@ -69,6 +69,8 @@ struct region {
 
 typedef struct page_table_entry {
     paddr_t frame;
+    int ref_count;
+    struct lock *lock;
 } PTE; // total 32 bits
 
 typedef struct l2_page_table {
@@ -163,5 +165,8 @@ int as_define_stack(struct addrspace *as, vaddr_t *initstackptr);
  */
 
 int load_elf(struct vnode *v, vaddr_t *entrypoint);
+
+void pte_inc_ref(PTE *pte);
+void pte_dec_ref(PTE *pte);
 
 #endif /* _ADDRSPACE_H_ */
