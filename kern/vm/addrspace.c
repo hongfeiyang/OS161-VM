@@ -38,7 +38,6 @@
 #include <vm.h>
 #include <proc.h>
 #include <elf.h>
-#include <synch.h>
 
 /*
  * Note! If OPT_DUMBVM is set, as is the case until you start the VM
@@ -68,53 +67,17 @@ page_table_init(void) {
 }
 
 static void
-pte_destroy(PTE *pte) {
-    KASSERT(pte != NULL);
-    KASSERT(pte->ref_count == 1);
-
-    paddr_t frame = pte->frame;
-    vaddr_t page = PADDR_TO_KVADDR(frame & PAGE_FRAME);
-    free_kpages(page);
-    lock_destroy(pte->lock);
-    pte->frame = 0;
-    pte->ref_count = 0;
-    pte->lock = NULL;
-    kfree(pte);
-}
-
-void
-pte_dec_ref(PTE *pte) {
-    KASSERT(pte != NULL);
-    KASSERT(pte->ref_count > 0);
-
-    if (pte->ref_count > 1) {
-        lock_acquire(pte->lock);
-        pte->ref_count--;
-        lock_release(pte->lock);
-    } else {
-        pte_destroy(pte);
-    }
-}
-
-void
-pte_inc_ref(PTE *pte) {
-    KASSERT(pte != NULL);
-    KASSERT(pte->ref_count > 0);
-
-    lock_acquire(pte->lock);
-    pte->ref_count++;
-    pte->frame &= ~TLBLO_DIRTY; // mark the page as unwriteable, so it triggers a page fault on write
-    lock_release(pte->lock);
-}
-
-static void
 page_table_destroy(PageTable *page_table) {
     for (int i = 0; i < 1 << L1_BITS; i++) {
         if (page_table->tables[i] != NULL) {
             for (int j = 0; j < 1 << L2_BITS; j++) {
                 if (page_table->tables[i]->entries[j] != NULL) {
-                    // decrement ref_count and free the frame if ref_count is 0
-                    pte_dec_ref(page_table->tables[i]->entries[j]);
+                    // Free the frame
+                    paddr_t frame = page_table->tables[i]->entries[j]->frame;
+                    vaddr_t page = PADDR_TO_KVADDR(frame & PAGE_FRAME);
+                    free_kpages(page);
+                    kfree(page_table->tables[i]->entries[j]);
+                    page_table->tables[i]->entries[j] = NULL;
                 }
             }
             kfree(page_table->tables[i]);
@@ -141,11 +104,31 @@ page_table_copy(PageTable *old) {
             }
 
             for (int j = 0; j < 1 << L2_BITS; j++) {
-                // only copy reference here, we have copy-on-write in vm
                 if (old->tables[i]->entries[j] != NULL) {
-                    pte_inc_ref(old->tables[i]->entries[j]);
+                    new->tables[i]->entries[j] = kmalloc(sizeof(*new->tables[i]->entries[j]));
+                    if (new->tables[i]->entries[j] == NULL) {
+                        page_table_destroy(new);
+                        return NULL;
+                    }
+
+                    vaddr_t new_page = alloc_kpages(1);
+                    if (new_page == 0) {
+                        page_table_destroy(new);
+                        return NULL;
+                    }
+                    // copy the contents of the old frame to the new frame
+                    memcpy((void *)new_page, (void *)PADDR_TO_KVADDR(old->tables[i]->entries[j]->frame & PAGE_FRAME), PAGE_SIZE);
+
+                    // we have the offset of the old frame, we need to copy offset bits to combine with the new frame address bits
+                    paddr_t new_paddr = KVADDR_TO_PADDR(new_page);
+                    paddr_t old_paddr = old->tables[i]->entries[j]->frame;
+
+                    // copy offset bits
+                    new->tables[i]->entries[j]->frame = new_paddr | (old_paddr & (~PAGE_FRAME));
+
+                } else {
+                    new->tables[i]->entries[j] = NULL;
                 }
-                new->tables[i]->entries[j] = old->tables[i]->entries[j];
             }
         } else {
             new->tables[i] = NULL;
@@ -153,6 +136,35 @@ page_table_copy(PageTable *old) {
     }
 
     return new;
+}
+
+static int
+page_table_identical(PageTable *pt1, PageTable *pt2) {
+    for (int i = 0; i < 1 << L1_BITS; i++) {
+        if (pt1->tables[i] == NULL && pt2->tables[i] == NULL) {
+            continue;
+        }
+
+        if (pt1->tables[i] == NULL || pt2->tables[i] == NULL) {
+            return 0;
+        }
+
+        for (int j = 0; j < 1 << L2_BITS; j++) {
+            if (pt1->tables[i]->entries[j] == NULL && pt2->tables[i]->entries[j] == NULL) {
+                continue;
+            }
+
+            if (pt1->tables[i]->entries[j] == NULL || pt2->tables[i]->entries[j] == NULL) {
+                return 0;
+            }
+
+            if (pt1->tables[i]->entries[j]->frame != pt2->tables[i]->entries[j]->frame) {
+                return 0;
+            }
+        }
+    }
+
+    return 1;
 }
 
 static struct region *
@@ -261,6 +273,7 @@ as_copy(struct addrspace *old, struct addrspace **ret) {
         as_destroy(newas);
         return ENOMEM;
     }
+    KASSERT(!page_table_identical(old->page_table, newas->page_table));
 
     newas->force_readwrite = old->force_readwrite;
 

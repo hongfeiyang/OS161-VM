@@ -7,72 +7,8 @@
 #include <machine/tlb.h>
 #include <spl.h>
 #include <proc.h>
-#include <synch.h>
 
 /* Place your page table functions here */
-
-static PTE *
-new_pte() {
-    PTE *pte = kmalloc(sizeof(*pte));
-    if (pte == NULL) {
-        return NULL;
-    }
-
-    vaddr_t vaddr = alloc_kpages(1);
-    if (vaddr == 0) {
-        return NULL;
-    }
-
-    // Zero fill the page
-    bzero((void *)vaddr, PAGE_SIZE);
-
-    paddr_t paddr = KVADDR_TO_PADDR(vaddr);
-    KASSERT((paddr & PAGE_FRAME) == paddr);
-
-    pte->frame = paddr;
-    pte->ref_count = 1;
-    pte->lock = lock_create("PTE lock");
-    if (pte->lock == NULL) {
-        kfree(pte);
-        return NULL;
-    }
-
-    return pte;
-}
-
-/*
- * Copy the given page that handles READONLY
- */
-static PTE *
-pte_copy_on_write(PTE *pte) {
-    if (pte == NULL) {
-        return NULL;
-    }
-    if (pte->ref_count == 1) {
-        // we can just mark this page as writeable
-        pte->frame |= TLBLO_DIRTY;
-        return pte;
-    }
-
-    PTE *new = new_pte();
-    if (new == NULL) {
-        return NULL;
-    }
-
-    // copy the contents of the old frame to the new frame
-    memcpy((void *)(PADDR_TO_KVADDR(new->frame) & PAGE_FRAME), (void *)(PADDR_TO_KVADDR(pte->frame) & PAGE_FRAME), PAGE_SIZE);
-
-    // copy offset bits
-    new->frame |= pte->frame & ~PAGE_FRAME;
-
-    // mark it as writeable
-    new->frame |= TLBLO_DIRTY;
-
-    // now we need to update the old page reference count
-    pte_dec_ref(pte);
-
-    return new;
-}
 
 static PTE *
 page_table_lookup(PageTable *page_table, vaddr_t vaddr) {
@@ -88,9 +24,14 @@ page_table_lookup(PageTable *page_table, vaddr_t vaddr) {
 }
 
 static int
-page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte) {
+page_table_add_entry(PageTable *page_table, vaddr_t vaddr, paddr_t paddr) {
 
-    KASSERT(pte != NULL);
+    PTE *pte = kmalloc(sizeof(*pte));
+    if (pte == NULL) {
+        return ENOMEM;
+    }
+
+    pte->frame = paddr;
 
     int l1_index = L1_INDEX(vaddr);
     int l2_index = L2_INDEX(vaddr);
@@ -98,14 +39,14 @@ page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte) {
     if (page_table->tables[l1_index] == NULL) {
         page_table->tables[l1_index] = kmalloc(sizeof(L2Table));
         if (page_table->tables[l1_index] == NULL) {
+            kfree(pte);
             return ENOMEM;
         }
         for (int i = 0; i < 1 << L2_BITS; i++) {
             page_table->tables[l1_index]->entries[i] = NULL;
         }
     }
-    // Potentially we can have a reference here to some PTE in other page tables
-    // so here we might replace it with a real page with ref count 1
+    // TODO: Can we have a collision here?
     page_table->tables[l1_index]->entries[l2_index] = pte;
 
     return 0;
@@ -137,18 +78,6 @@ load_tlb(vaddr_t vaddr, paddr_t paddr, bool force_rw) {
     splx(spl);
 }
 
-static struct region *
-find_region(struct addrspace *as, vaddr_t vaddr) {
-    struct region *current_region = as->regions;
-    while (current_region != NULL) {
-        if (current_region->vbase <= vaddr && vaddr < current_region->vtop) {
-            return current_region;
-        }
-        current_region = current_region->next;
-    }
-    return NULL;
-}
-
 void
 vm_bootstrap(void) {
     /* Initialise any global components of your VM sub-system here.
@@ -172,18 +101,14 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
     case VM_FAULT_WRITE:
         break;
     case VM_FAULT_READONLY:
-        // we need to figure out if we need to do copy on write
-        // so first thing we need to check is if we already have a page table entry
-        // if we do, we need to check the reference count
-        // if the reference count is greater than 1, we need to copy the page
-        // and update the page table
-        break;
+        return EFAULT;
     default:
         return EINVAL;
     }
 
     /*
-     * Get the current address space
+     * At this point, we know that the fault was a read or write fault.
+     * Handle this fault. Look up page table first
      */
 
     struct addrspace *as;
@@ -201,32 +126,10 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
     PTE *pte = page_table_lookup(pt, faultaddress);
 
     /*
-     * If this is a valid translation, we need to check if we need to do copy on write
+     * If this is a valid translation, we can load TLB
      */
     if (pte) {
         paddr_t paddr = pte->frame;
-
-        if (faulttype == VM_FAULT_READONLY) {
-
-            struct region *current_region = find_region(as, faultaddress);
-
-            if (!current_region->writeable) {
-                // this falls under a readonly region, are you are trying to write to it?
-                return EFAULT;
-            }
-
-            // now we know it is made readonly for copy on write
-
-            PTE *new_entry = pte_copy_on_write(pte);
-            KASSERT(new_entry != NULL);
-            KASSERT(new_entry->ref_count == 1);
-            paddr = new_entry->frame;
-            int result = page_table_add_entry(pt, faultaddress, new_entry);
-            if (result) {
-                return result;
-            }
-        }
-
         load_tlb(faultaddress, paddr, as->force_readwrite);
         return 0;
     }
@@ -235,8 +138,13 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
      * Otherwise we need to check if this is a valid translation, we need to look up in regions
      */
 
-    struct region *current_region = find_region(as, faultaddress);
-
+    struct region *current_region = as->regions;
+    while (current_region != NULL) {
+        if (current_region->vbase <= faultaddress && faultaddress < current_region->vtop) {
+            break;
+        }
+        current_region = current_region->next;
+    }
     if (current_region == NULL) {
         /*
          * Not found in regions, this is an invalid address
@@ -257,10 +165,21 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
     /*
      * At this point we know this is in a valid region, we need to allocate a page and add it to the page table
      */
-    PTE *new_entry = new_pte();
+    vaddr_t vaddr = alloc_kpages(1);
+    if (vaddr == 0) {
+        return ENOMEM;
+    }
 
-    // modify the paddr to include control bits
-    paddr_t paddr = new_entry->frame;
+    // Zero fill the page
+    bzero((void *)vaddr, PAGE_SIZE);
+
+    /*
+     * Now add this to the page table
+     */
+
+    // First, we need to get the physical address
+
+    paddr_t paddr = KVADDR_TO_PADDR(vaddr);
 
     paddr |= TLBLO_VALID;
 
@@ -268,11 +187,9 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
     if (current_region->writeable) {
         paddr |= TLBLO_DIRTY;
     }
-    // commit the changes
-    new_entry->frame = paddr;
 
     // Add the new page table entry to the page table
-    int result = page_table_add_entry(pt, faultaddress, new_entry);
+    int result = page_table_add_entry(pt, faultaddress, paddr);
     if (result) {
         return result;
     }
@@ -281,7 +198,7 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
      * Now we can load the TLB
      */
 
-    load_tlb(faultaddress, new_entry->frame, as->force_readwrite);
+    load_tlb(faultaddress, paddr, as->force_readwrite);
 
     return 0;
 }
