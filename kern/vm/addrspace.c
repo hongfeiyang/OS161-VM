@@ -87,11 +87,12 @@ pte_dec_ref(PTE *pte) {
     KASSERT(pte != NULL);
     KASSERT(pte->ref_count > 0);
 
+    lock_acquire(pte->lock);
     if (pte->ref_count > 1) {
-        lock_acquire(pte->lock);
         pte->ref_count--;
         lock_release(pte->lock);
     } else {
+        lock_release(pte->lock);
         pte_destroy(pte);
     }
 }

@@ -48,14 +48,17 @@ pte_copy_on_write(PTE *pte) {
     if (pte == NULL) {
         return NULL;
     }
+    lock_acquire(pte->lock);
     if (pte->ref_count == 1) {
         // we can just mark this page as writeable
         pte->frame |= TLBLO_DIRTY;
+        lock_release(pte->lock);
         return pte;
     }
 
     PTE *new = new_pte();
     if (new == NULL) {
+        lock_release(pte->lock);
         return NULL;
     }
 
@@ -69,7 +72,11 @@ pte_copy_on_write(PTE *pte) {
     new->frame |= TLBLO_DIRTY;
 
     // now we need to update the old page reference count
-    pte_dec_ref(pte);
+    pte->ref_count--;
+
+    KASSERT(pte->ref_count >= 0);
+
+    lock_release(pte->lock);
 
     return new;
 }
@@ -197,42 +204,8 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
         return EFAULT;
     }
 
-    /* Find the page table entry */
-    PTE *pte = page_table_lookup(pt, faultaddress);
-
     /*
-     * If this is a valid translation, we need to check if we need to do copy on write
-     */
-    if (pte) {
-        paddr_t paddr = pte->frame;
-
-        if (faulttype == VM_FAULT_READONLY) {
-
-            struct region *current_region = find_region(as, faultaddress);
-
-            if (!current_region->writeable) {
-                // this falls under a readonly region, are you are trying to write to it?
-                return EFAULT;
-            }
-
-            // now we know it is made readonly for copy on write
-
-            PTE *new_entry = pte_copy_on_write(pte);
-            KASSERT(new_entry != NULL);
-            KASSERT(new_entry->ref_count == 1);
-            paddr = new_entry->frame;
-            int result = page_table_add_entry(pt, faultaddress, new_entry);
-            if (result) {
-                return result;
-            }
-        }
-
-        load_tlb(faultaddress, paddr, as->force_readwrite);
-        return 0;
-    }
-
-    /*
-     * Otherwise we need to check if this is a valid translation, we need to look up in regions
+     * we need to look up this address in regions
      */
 
     struct region *current_region = find_region(as, faultaddress);
@@ -252,6 +225,38 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
     /* now check if we receive a write fault on a read-only page, with forced write off */
     if (!current_region->writeable && !as->force_readwrite && faulttype == VM_FAULT_WRITE) {
         return EFAULT;
+    }
+
+    if (faulttype == VM_FAULT_READONLY && !current_region->writeable && !as->force_readwrite) {
+        // this falls under a readonly region, and you are trying to write to it?
+        return EFAULT;
+    }
+
+    /* Find the page table entry */
+    PTE *pte = page_table_lookup(pt, faultaddress);
+
+    /*
+     * If this is a valid translation, we need to check if we need to do copy on write
+     */
+    if (pte) {
+        paddr_t paddr = pte->frame;
+
+        if (faulttype == VM_FAULT_READONLY) {
+
+            // now we know it is made readonly for copy on write
+
+            PTE *new_entry = pte_copy_on_write(pte);
+            KASSERT(new_entry != NULL);
+            KASSERT(new_entry->ref_count == 1);
+            paddr = new_entry->frame;
+            int result = page_table_add_entry(pt, faultaddress, new_entry);
+            if (result) {
+                return result;
+            }
+        }
+
+        load_tlb(faultaddress, paddr, as->force_readwrite);
+        return 0;
     }
 
     /*
