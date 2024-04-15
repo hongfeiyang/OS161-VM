@@ -38,7 +38,6 @@
 #include <copyinout.h>
 #include <syscall.h>
 
-
 /*
  * System call dispatcher.
  *
@@ -78,224 +77,217 @@
  * registerized values, with copyin().
  */
 void
-syscall(struct trapframe *tf)
-{
-	int callno;
-	int32_t retval;
-	int err;
+syscall(struct trapframe *tf) {
+    int callno;
+    int32_t retval;
+    int err;
 
-	KASSERT(curthread != NULL);
-	KASSERT(curthread->t_curspl == 0);
-	KASSERT(curthread->t_iplhigh_count == 0);
+    KASSERT(curthread != NULL);
+    KASSERT(curthread->t_curspl == 0);
+    KASSERT(curthread->t_iplhigh_count == 0);
 
-	callno = tf->tf_v0;
+    callno = tf->tf_v0;
 
-	/*
-	 * Initialize retval to 0. Many of the system calls don't
-	 * really return a value, just 0 for success and -1 on
-	 * error. Since retval is the value returned on success,
-	 * initialize it to 0 by default; thus it's not necessary to
-	 * deal with it except for calls that return other values,
-	 * like write.
-	 */
+    /*
+     * Initialize retval to 0. Many of the system calls don't
+     * really return a value, just 0 for success and -1 on
+     * error. Since retval is the value returned on success,
+     * initialize it to 0 by default; thus it's not necessary to
+     * deal with it except for calls that return other values,
+     * like write.
+     */
 
-	retval = 0;
+    retval = 0;
 
-	/* note the casts to userptr_t */
+    /* note the casts to userptr_t */
 
-	switch (callno) {
-	    case SYS_reboot:
-		err = sys_reboot(tf->tf_a0);
-		break;
+    switch (callno) {
+    case SYS_reboot:
+        err = sys_reboot(tf->tf_a0);
+        break;
 
-	    case SYS___time:
-		err = sys___time((userptr_t)tf->tf_a0,
-				 (userptr_t)tf->tf_a1);
-		break;
+    case SYS___time:
+        err = sys___time((userptr_t)tf->tf_a0,
+                         (userptr_t)tf->tf_a1);
+        break;
 
+        /* process calls */
 
-	    /* process calls */
+    case SYS_fork:
+        err = sys_fork(tf, &retval);
+        break;
 
-	    case SYS_fork:
-		err = sys_fork(tf, &retval);
-		break;
+    case SYS_execv:
+        err = sys_execv(
+            (userptr_t)tf->tf_a0,
+            (userptr_t)tf->tf_a1);
+        break;
 
-	    case SYS_execv:
-		err = sys_execv(
-			(userptr_t)tf->tf_a0,
-			(userptr_t)tf->tf_a1);
-		break;
+    case SYS__exit:
+        sys__exit(tf->tf_a0);
+        panic("Returning from exit\n");
 
-	    case SYS__exit:
-		sys__exit(tf->tf_a0);
-		panic("Returning from exit\n");
+    case SYS_waitpid:
+        err = sys_waitpid(
+            tf->tf_a0,
+            (userptr_t)tf->tf_a1,
+            tf->tf_a2,
+            &retval);
+        break;
 
-	    case SYS_waitpid:
-		err = sys_waitpid(
-			tf->tf_a0,
-			(userptr_t)tf->tf_a1,
-			tf->tf_a2,
-			&retval);
-		break;
+    case SYS_getpid:
+        err = sys_getpid(&retval);
+        break;
 
-	    case SYS_getpid:
-		err = sys_getpid(&retval);
-		break;
+        /* file calls */
 
+    case SYS_open:
+        err = sys_open(
+            (userptr_t)tf->tf_a0,
+            tf->tf_a1,
+            tf->tf_a2,
+            &retval);
+        break;
 
-	    /* file calls */
+    case SYS_dup2:
+        err = sys_dup2(
+            tf->tf_a0,
+            tf->tf_a1,
+            &retval);
+        break;
 
-	    case SYS_open:
-		err = sys_open(
-			(userptr_t)tf->tf_a0,
-			tf->tf_a1,
-			tf->tf_a2,
-			&retval);
-		break;
+    case SYS_close:
+        err = sys_close(tf->tf_a0);
+        break;
 
-	    case SYS_dup2:
-		err = sys_dup2(
-			tf->tf_a0,
-			tf->tf_a1,
-			&retval);
-		break;
+    case SYS_read:
+        err = sys_read(
+            tf->tf_a0,
+            (userptr_t)tf->tf_a1,
+            tf->tf_a2,
+            &retval);
+        break;
+    case SYS_write:
+        err = sys_write(
+            tf->tf_a0,
+            (userptr_t)tf->tf_a1,
+            tf->tf_a2,
+            &retval);
+        break;
+    case SYS_lseek: {
+        /*
+         * Because the position argument is 64 bits wide,
+         * it goes in the a2/a3 registers and we have to
+         * get "whence" from the stack. Furthermore, the
+         * return value is 64 bits wide, so the extra
+         * part of it goes in the v1 register.
+         *
+         * This is a trifle messy.
+         */
+        uint64_t offset;
+        int whence;
+        off_t retval64;
 
-	    case SYS_close:
-		err = sys_close(tf->tf_a0);
-		break;
+        join32to64(tf->tf_a2, tf->tf_a3, &offset);
 
-	    case SYS_read:
-		err = sys_read(
-			tf->tf_a0,
-			(userptr_t)tf->tf_a1,
-			tf->tf_a2,
-			&retval);
-		break;
-	    case SYS_write:
-		err = sys_write(
-			tf->tf_a0,
-			(userptr_t)tf->tf_a1,
-			tf->tf_a2,
-			&retval);
-		break;
-	    case SYS_lseek:
-		{
-			/*
-			 * Because the position argument is 64 bits wide,
-			 * it goes in the a2/a3 registers and we have to
-			 * get "whence" from the stack. Furthermore, the
-			 * return value is 64 bits wide, so the extra
-			 * part of it goes in the v1 register.
-			 *
-			 * This is a trifle messy.
-			 */
-			uint64_t offset;
-			int whence;
-			off_t retval64;
+        err = copyin((userptr_t)tf->tf_sp + 16,
+                     &whence, sizeof(int));
+        if (err) {
+            break;
+        }
 
-			join32to64(tf->tf_a2, tf->tf_a3, &offset);
+        err = sys_lseek(tf->tf_a0, offset, whence, &retval64);
+        if (err) {
+            break;
+        }
 
-			err = copyin((userptr_t)tf->tf_sp + 16,
-				     &whence, sizeof(int));
-			if (err) {
-				break;
-			}
+        split64to32(retval64, &tf->tf_v0, &tf->tf_v1);
+        retval = tf->tf_v0;
+    } break;
 
-			err = sys_lseek(tf->tf_a0, offset, whence, &retval64);
-			if (err) {
-				break;
-			}
+    case SYS_chdir:
+        err = sys_chdir((userptr_t)tf->tf_a0);
+        break;
 
-			split64to32(retval64, &tf->tf_v0, &tf->tf_v1);
-			retval = tf->tf_v0;
-		}
-		break;
+    case SYS___getcwd:
+        err = sys___getcwd(
+            (userptr_t)tf->tf_a0,
+            tf->tf_a1,
+            &retval);
+        break;
 
-	    case SYS_chdir:
-		err = sys_chdir((userptr_t)tf->tf_a0);
-		break;
+    case SYS_sync:
+        err = sys_sync();
+        break;
+    case SYS_mkdir:
+        err = sys_mkdir((userptr_t)tf->tf_a0, tf->tf_a1);
+        break;
+    case SYS_rmdir:
+        err = sys_rmdir((userptr_t)tf->tf_a0);
+        break;
+    case SYS_remove:
+        err = sys_remove((userptr_t)tf->tf_a0);
+        break;
+    case SYS_link:
+        err = sys_link((userptr_t)tf->tf_a0, (userptr_t)tf->tf_a1);
+        break;
+    case SYS_rename:
+        err = sys_rename((userptr_t)tf->tf_a0, (userptr_t)tf->tf_a1);
+        break;
+    case SYS_getdirentry:
+        err = sys_getdirentry(tf->tf_a0, (userptr_t)tf->tf_a1,
+                              tf->tf_a2, &retval);
+        break;
+    case SYS_fstat:
+        err = sys_fstat(tf->tf_a0, (userptr_t)tf->tf_a1);
+        break;
+    case SYS_fsync:
+        err = sys_fsync(tf->tf_a0);
+        break;
+    case SYS_ftruncate: {
+        /* Like lseek, the length is 64 bits and aligned */
+        uint64_t len;
 
-	    case SYS___getcwd:
-		err = sys___getcwd(
-			(userptr_t)tf->tf_a0,
-			tf->tf_a1,
-			&retval);
-		break;
+        join32to64(tf->tf_a2, tf->tf_a3, &len);
+        err = sys_ftruncate(tf->tf_a0, len);
+    } break;
 
+        /* mem syscalls */
+    case SYS_sbrk:
+        err = sys_sbrk((ssize_t)tf->tf_a0, (vaddr_t *)&retval);
+        break;
 
-	    case SYS_sync:
-		err = sys_sync();
-		break;
-	    case SYS_mkdir:
-		err = sys_mkdir((userptr_t)tf->tf_a0, tf->tf_a1);
-		break;
-	    case SYS_rmdir:
-		err = sys_rmdir((userptr_t)tf->tf_a0);
-		break;
-	    case SYS_remove:
-		err = sys_remove((userptr_t)tf->tf_a0);
-		break;
-	    case SYS_link:
-		err = sys_link((userptr_t)tf->tf_a0, (userptr_t)tf->tf_a1);
-		break;
-	    case SYS_rename:
-		err = sys_rename((userptr_t)tf->tf_a0, (userptr_t)tf->tf_a1);
-		break;
-	    case SYS_getdirentry:
-		err = sys_getdirentry(tf->tf_a0, (userptr_t)tf->tf_a1,
-				      tf->tf_a2, &retval);
-		break;
-	    case SYS_fstat:
-		err = sys_fstat(tf->tf_a0, (userptr_t)tf->tf_a1);
-		break;
-	    case SYS_fsync:
-		err = sys_fsync(tf->tf_a0);
-		break;
-	    case SYS_ftruncate:
-		{
-			/* Like lseek, the length is 64 bits and aligned */
-			uint64_t len;
+    default:
+        kprintf("Unknown syscall %d\n", callno);
+        err = ENOSYS;
+        break;
+    }
 
-			join32to64(tf->tf_a2, tf->tf_a3, &len);
-			err = sys_ftruncate(tf->tf_a0, len);
-		}
-		break;
+    if (err) {
+        /*
+         * Return the error code. This gets converted at
+         * userlevel to a return value of -1 and the error
+         * code in errno.
+         */
+        tf->tf_v0 = err;
+        tf->tf_a3 = 1; /* signal an error */
+    } else {
+        /* Success. */
+        tf->tf_v0 = retval;
+        tf->tf_a3 = 0; /* signal no error */
+    }
 
+    /*
+     * Now, advance the program counter, to avoid restarting
+     * the syscall over and over again.
+     */
 
+    tf->tf_epc += 4;
 
-	    default:
-		kprintf("Unknown syscall %d\n", callno);
-		err = ENOSYS;
-		break;
-	}
-
-
-	if (err) {
-		/*
-		 * Return the error code. This gets converted at
-		 * userlevel to a return value of -1 and the error
-		 * code in errno.
-		 */
-		tf->tf_v0 = err;
-		tf->tf_a3 = 1;      /* signal an error */
-	}
-	else {
-		/* Success. */
-		tf->tf_v0 = retval;
-		tf->tf_a3 = 0;      /* signal no error */
-	}
-
-	/*
-	 * Now, advance the program counter, to avoid restarting
-	 * the syscall over and over again.
-	 */
-
-	tf->tf_epc += 4;
-
-	/* Make sure the syscall code didn't forget to lower spl */
-	KASSERT(curthread->t_curspl == 0);
-	/* ...or leak any spinlocks */
-	KASSERT(curthread->t_iplhigh_count == 0);
+    /* Make sure the syscall code didn't forget to lower spl */
+    KASSERT(curthread->t_curspl == 0);
+    /* ...or leak any spinlocks */
+    KASSERT(curthread->t_iplhigh_count == 0);
 }
 
 /*
@@ -304,15 +296,14 @@ syscall(struct trapframe *tf)
  * Succeed and return 0 into userspace.
  */
 void
-enter_forked_process(struct trapframe *tf)
-{
-	tf->tf_v0 = 0;
-	tf->tf_a3 = 0;
+enter_forked_process(struct trapframe *tf) {
+    tf->tf_v0 = 0;
+    tf->tf_a3 = 0;
 
-	/*
-	 * Advance the PC.
-	 */
-	tf->tf_epc += 4;
+    /*
+     * Advance the PC.
+     */
+    tf->tf_epc += 4;
 
-	mips_usermode(tf);
+    mips_usermode(tf);
 }

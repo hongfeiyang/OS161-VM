@@ -67,10 +67,62 @@ page_table_init(void) {
     return page_table;
 }
 
-static void
+PTE *
+page_table_lookup(PageTable *page_table, vaddr_t vaddr) {
+    int l1_index = L1_INDEX(vaddr);
+    int l2_index = L2_INDEX(vaddr);
+
+    if (page_table->tables[l1_index] == NULL) {
+        return NULL;
+    }
+
+    PTE *entry = page_table->tables[l1_index]->entries[l2_index];
+    return entry;
+}
+
+int
+page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte) {
+
+    KASSERT(pte != NULL);
+
+    int l1_index = L1_INDEX(vaddr);
+    int l2_index = L2_INDEX(vaddr);
+
+    if (page_table->tables[l1_index] == NULL) {
+        page_table->tables[l1_index] = kmalloc(sizeof(L2Table));
+        if (page_table->tables[l1_index] == NULL) {
+            return ENOMEM;
+        }
+        for (int i = 0; i < 1 << L2_BITS; i++) {
+            page_table->tables[l1_index]->entries[i] = NULL;
+        }
+    }
+    // Potentially we can have a reference here to some PTE in other page tables
+    // so here we might replace it with a real page with ref count 1
+    page_table->tables[l1_index]->entries[l2_index] = pte;
+
+    return 0;
+}
+
+PTE *
+page_table_remove_entry(PageTable *page_table, vaddr_t vaddr) {
+    int l1_index = L1_INDEX(vaddr);
+    int l2_index = L2_INDEX(vaddr);
+
+    if (page_table->tables[l1_index] == NULL) {
+        return NULL;
+    }
+
+    PTE *entry = page_table->tables[l1_index]->entries[l2_index];
+    page_table->tables[l1_index]->entries[l2_index] = NULL;
+
+    return entry;
+}
+
+void
 pte_destroy(PTE *pte) {
     KASSERT(pte != NULL);
-#if COW
+#if OPT_COW
     KASSERT(pte->ref_count == 1);
 #endif
 
@@ -78,7 +130,7 @@ pte_destroy(PTE *pte) {
     vaddr_t page = PADDR_TO_KVADDR(frame & PAGE_FRAME);
     free_kpages(page);
     pte->frame = 0;
-#if COW
+#if OPT_COW
     lock_destroy(pte->lock);
     pte->ref_count = 0;
     pte->lock = NULL;
@@ -86,7 +138,7 @@ pte_destroy(PTE *pte) {
     kfree(pte);
 }
 
-#if COW
+#if OPT_COW
 void
 pte_dec_ref(PTE *pte) {
     KASSERT(pte != NULL);
@@ -133,7 +185,7 @@ new_pte() {
     KASSERT((paddr & PAGE_FRAME) == paddr);
 
     pte->frame = paddr;
-#if COW
+#if OPT_COW
     pte->ref_count = 1;
     pte->lock = lock_create("PTE lock");
     if (pte->lock == NULL) {
@@ -152,7 +204,7 @@ PTE *
 pte_copy(PTE *pte) {
     KASSERT(pte != NULL);
 
-#if COW
+#if OPT_COW
     if (pte->ref_count == 1) {
         // we can just mark this page as writeable
         pte->frame |= TLBLO_DIRTY;
@@ -174,7 +226,7 @@ pte_copy(PTE *pte) {
     // mark it as writeable
     new->frame |= TLBLO_DIRTY;
 
-#if COW
+#if OPT_COW
     // now we need to update the old page reference count
     pte->ref_count--;
 
@@ -190,7 +242,7 @@ page_table_destroy(PageTable *page_table) {
         if (page_table->tables[i] != NULL) {
             for (int j = 0; j < 1 << L2_BITS; j++) {
                 if (page_table->tables[i]->entries[j] != NULL) {
-#if COW
+#if OPT_COW
                     // decrement ref_count and free the frame if ref_count is 0
                     pte_dec_ref(page_table->tables[i]->entries[j]);
 #else
@@ -224,7 +276,7 @@ page_table_copy(PageTable *old) {
             for (int j = 0; j < 1 << L2_BITS; j++) {
                 // only copy reference here, we have copy-on-write in vm
                 if (old->tables[i]->entries[j] != NULL) {
-#if COW
+#if OPT_COW
                     pte_inc_ref(old->tables[i]->entries[j]);
                     new->tables[i]->entries[j] = old->tables[i]->entries[j];
 #else
@@ -354,6 +406,22 @@ as_copy(struct addrspace *old, struct addrspace **ret) {
     }
 
     newas->force_readwrite = old->force_readwrite;
+
+#if OPT_SBRK
+    // assign the heap and stack regions
+    // stack is the last region and heap is the second last region
+    struct region *current = newas->regions;
+    while (current->next != NULL) {
+        current = current->next;
+    }
+    newas->stack = current;
+    current = newas->regions;
+    while (current->next != newas->stack) {
+        current = current->next;
+    }
+    newas->heap = current;
+
+#endif
 
     *ret = newas;
     return 0;
@@ -507,12 +575,47 @@ as_define_stack(struct addrspace *as, vaddr_t *stackptr) {
     /* Initial user-level stack pointer */
     *stackptr = USERSTACK;
 
+    // given that we are defining stack, we can also define heap here as well
+    // Heap region is read/write and not executable
+    // we find the top of the top most region and add heap region after that and just below the stack
+
+    struct region *current = as->regions;
+    struct region *topmost = current;
+    while (current != NULL) {
+        if (current->vtop > topmost->vtop) {
+            topmost = current;
+        }
+        current = current->next;
+    }
+
+    vaddr_t heap_base = topmost->vtop;
+    // heap initially does not have any pages
+
+    as_define_region(as, heap_base, 0, PF_R, PF_W, 0);
+
+    // now keep a reference to the heap region for convenience, it should be the last item in the linked list
+    current = as->regions;
+    while (current->next != NULL) {
+        current = current->next;
+    }
+    as->heap = current;
+    KASSERT(as->heap->vbase == heap_base);
+    KASSERT(as->heap->npages == 0);
+
     // ELF does not contain a stack region because initially stack is empty
     // and it grows downwards
     // We need to define the stack region here
 
     // Stack region is read/write and not executable
     as_define_region(as, USERSTACK - YANG_VM_STACKPAGES * PAGE_SIZE, YANG_VM_STACKPAGES * PAGE_SIZE, PF_R, PF_W, 0);
+    // keep a reference to the stack region for convenience
+    current = as->regions;
+    while (current->next != NULL) {
+        current = current->next;
+    }
+    as->stack = current;
+    KASSERT(as->stack->vbase == USERSTACK - YANG_VM_STACKPAGES * PAGE_SIZE);
+    KASSERT(as->stack->npages == YANG_VM_STACKPAGES);
 
     return 0;
 }

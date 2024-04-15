@@ -30,7 +30,8 @@
 #ifndef _ADDRSPACE_H_
 #define _ADDRSPACE_H_
 
-#define COW 0
+#define OPT_COW 0
+#define OPT_SBRK 1
 
 /*
  * Address space structure and operations.
@@ -102,6 +103,11 @@ struct addrspace {
     struct region *regions;
     bool force_readwrite;
     PageTable *page_table;
+#if OPT_SBRK
+    struct region *heap;
+    struct region *stack;
+#endif
+
 #endif
 };
 
@@ -170,12 +176,16 @@ int as_define_stack(struct addrspace *as, vaddr_t *initstackptr);
 
 int load_elf(struct vnode *v, vaddr_t *entrypoint);
 
-#if COW
+#if OPT_COW
 void pte_inc_ref(PTE *pte);
 void pte_dec_ref(PTE *pte);
 #endif
 
 PTE *pte_copy(PTE *pte);
 PTE *new_pte(void);
+void pte_destroy(PTE *pte);
+PTE *page_table_lookup(PageTable *pt, vaddr_t addr);
+int page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte);
+PTE *page_table_remove_entry(PageTable *page_table, vaddr_t vaddr);
 
 #endif /* _ADDRSPACE_H_ */

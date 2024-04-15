@@ -30,9 +30,8 @@
 #ifndef _SYSCALL_H_
 #define _SYSCALL_H_
 
-
 #include <cdefs.h> /* for __DEAD */
-struct trapframe; /* from <machine/trapframe.h> */
+struct trapframe;  /* from <machine/trapframe.h> */
 
 /*
  * The system call dispatcher.
@@ -49,11 +48,10 @@ void enter_forked_process(struct trapframe *tf);
 
 /* Enter user mode. Does not return. */
 __DEAD void enter_new_process(int argc, userptr_t argv, userptr_t env,
-		       vaddr_t stackptr, vaddr_t entrypoint);
+                              vaddr_t stackptr, vaddr_t entrypoint);
 
 /* Setup function for exec. */
 void exec_bootstrap(void);
-
 
 /*
  * Prototypes for IN-KERNEL entry points for system call implementations.
@@ -91,5 +89,7 @@ int sys_getdirentry(int fd, userptr_t buf, size_t buflen, int *retval);
 int sys_fstat(int fd, userptr_t statptr);
 int sys_fsync(int fd);
 int sys_ftruncate(int fd, off_t len);
+
+int sys_sbrk(ssize_t amount, vaddr_t *retval);
 
 #endif /* _SYSCALL_H_ */

@@ -11,43 +11,6 @@
 
 /* Place your page table functions here */
 
-static PTE *
-page_table_lookup(PageTable *page_table, vaddr_t vaddr) {
-    int l1_index = L1_INDEX(vaddr);
-    int l2_index = L2_INDEX(vaddr);
-
-    if (page_table->tables[l1_index] == NULL) {
-        return NULL;
-    }
-
-    PTE *entry = page_table->tables[l1_index]->entries[l2_index];
-    return entry;
-}
-
-static int
-page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte) {
-
-    KASSERT(pte != NULL);
-
-    int l1_index = L1_INDEX(vaddr);
-    int l2_index = L2_INDEX(vaddr);
-
-    if (page_table->tables[l1_index] == NULL) {
-        page_table->tables[l1_index] = kmalloc(sizeof(L2Table));
-        if (page_table->tables[l1_index] == NULL) {
-            return ENOMEM;
-        }
-        for (int i = 0; i < 1 << L2_BITS; i++) {
-            page_table->tables[l1_index]->entries[i] = NULL;
-        }
-    }
-    // Potentially we can have a reference here to some PTE in other page tables
-    // so here we might replace it with a real page with ref count 1
-    page_table->tables[l1_index]->entries[l2_index] = pte;
-
-    return 0;
-}
-
 static void
 load_tlb(vaddr_t vaddr, paddr_t paddr, bool force_rw) {
     uint32_t ehi, elo;
@@ -110,7 +73,7 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
         break;
     case VM_FAULT_READONLY:
 
-#if COW
+#if OPT_COW
         // we need to figure out if we need to do copy on write
         // so first thing we need to check is if we already have a page table entry
         // if we do, we need to check the reference count
@@ -176,7 +139,7 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
      */
     if (pte) {
         paddr_t paddr = pte->frame;
-#if COW
+#if OPT_COW
         if (faulttype == VM_FAULT_READONLY) {
 
             // now we know it is made readonly for copy on write
@@ -200,6 +163,10 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
      * At this point we know this is in a valid region, we need to allocate a page and add it to the page table
      */
     PTE *new_entry = new_pte();
+
+    if (new_entry == NULL) {
+        return ENOMEM;
+    }
 
     // modify the paddr to include control bits
     paddr_t paddr = new_entry->frame;
