@@ -72,7 +72,7 @@ struct region {
 
 typedef struct page_table_entry {
     paddr_t frame;
-#if COW
+#if OPT_COW
     int ref_count;
     struct lock *lock;
 #endif
