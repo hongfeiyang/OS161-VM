@@ -70,24 +70,30 @@ page_table_init(void) {
 static void
 pte_destroy(PTE *pte) {
     KASSERT(pte != NULL);
+#if COW
     KASSERT(pte->ref_count == 1);
+#endif
 
     paddr_t frame = pte->frame;
     vaddr_t page = PADDR_TO_KVADDR(frame & PAGE_FRAME);
     free_kpages(page);
-    lock_destroy(pte->lock);
     pte->frame = 0;
+#if COW
+    lock_destroy(pte->lock);
     pte->ref_count = 0;
     pte->lock = NULL;
+#endif
     kfree(pte);
 }
 
+#if COW
 void
 pte_dec_ref(PTE *pte) {
     KASSERT(pte != NULL);
-    KASSERT(pte->ref_count > 0);
+    KASSERT(pte->lock != NULL);
 
     lock_acquire(pte->lock);
+    KASSERT(pte->ref_count > 0);
     if (pte->ref_count > 1) {
         pte->ref_count--;
         lock_release(pte->lock);
@@ -96,7 +102,6 @@ pte_dec_ref(PTE *pte) {
         pte_destroy(pte);
     }
 }
-
 void
 pte_inc_ref(PTE *pte) {
     KASSERT(pte != NULL);
@@ -107,6 +112,77 @@ pte_inc_ref(PTE *pte) {
     pte->frame &= ~TLBLO_DIRTY; // mark the page as unwriteable, so it triggers a page fault on write
     lock_release(pte->lock);
 }
+#endif
+
+PTE *
+new_pte() {
+    PTE *pte = kmalloc(sizeof(*pte));
+    if (pte == NULL) {
+        return NULL;
+    }
+
+    vaddr_t vaddr = alloc_kpages(1);
+    if (vaddr == 0) {
+        return NULL;
+    }
+
+    // Zero fill the page
+    bzero((void *)vaddr, PAGE_SIZE);
+
+    paddr_t paddr = KVADDR_TO_PADDR(vaddr);
+    KASSERT((paddr & PAGE_FRAME) == paddr);
+
+    pte->frame = paddr;
+#if COW
+    pte->ref_count = 1;
+    pte->lock = lock_create("PTE lock");
+    if (pte->lock == NULL) {
+        kfree(pte);
+        return NULL;
+    }
+#endif
+
+    return pte;
+}
+
+/*
+ * Copy the given page that handles READONLY
+ */
+PTE *
+pte_copy(PTE *pte) {
+    KASSERT(pte != NULL);
+
+#if COW
+    if (pte->ref_count == 1) {
+        // we can just mark this page as writeable
+        pte->frame |= TLBLO_DIRTY;
+        return pte;
+    }
+#endif
+
+    PTE *new = new_pte();
+    if (new == NULL) {
+        return NULL;
+    }
+
+    // copy the contents of the old frame to the new frame
+    memcpy((void *)(PADDR_TO_KVADDR(new->frame) & PAGE_FRAME), (void *)(PADDR_TO_KVADDR(pte->frame) & PAGE_FRAME), PAGE_SIZE);
+
+    // copy offset bits
+    new->frame |= pte->frame & ~PAGE_FRAME;
+
+    // mark it as writeable
+    new->frame |= TLBLO_DIRTY;
+
+#if COW
+    // now we need to update the old page reference count
+    pte->ref_count--;
+
+    KASSERT(pte->ref_count > 0);
+#endif
+
+    return new;
+}
 
 static void
 page_table_destroy(PageTable *page_table) {
@@ -114,8 +190,12 @@ page_table_destroy(PageTable *page_table) {
         if (page_table->tables[i] != NULL) {
             for (int j = 0; j < 1 << L2_BITS; j++) {
                 if (page_table->tables[i]->entries[j] != NULL) {
+#if COW
                     // decrement ref_count and free the frame if ref_count is 0
                     pte_dec_ref(page_table->tables[i]->entries[j]);
+#else
+                    pte_destroy(page_table->tables[i]->entries[j]);
+#endif
                 }
             }
             kfree(page_table->tables[i]);
@@ -144,9 +224,19 @@ page_table_copy(PageTable *old) {
             for (int j = 0; j < 1 << L2_BITS; j++) {
                 // only copy reference here, we have copy-on-write in vm
                 if (old->tables[i]->entries[j] != NULL) {
+#if COW
                     pte_inc_ref(old->tables[i]->entries[j]);
+                    new->tables[i]->entries[j] = old->tables[i]->entries[j];
+#else
+                    new->tables[i]->entries[j] = pte_copy(old->tables[i]->entries[j]);
+                    if (new->tables[i]->entries[j] == NULL) {
+                        page_table_destroy(new);
+                        return NULL;
+                    }
+#endif
+                } else {
+                    new->tables[i]->entries[j] = NULL;
                 }
-                new->tables[i]->entries[j] = old->tables[i]->entries[j];
             }
         } else {
             new->tables[i] = NULL;

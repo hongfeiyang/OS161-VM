@@ -30,6 +30,8 @@
 #ifndef _ADDRSPACE_H_
 #define _ADDRSPACE_H_
 
+#define COW 0
+
 /*
  * Address space structure and operations.
  */
@@ -69,8 +71,10 @@ struct region {
 
 typedef struct page_table_entry {
     paddr_t frame;
+#if COW
     int ref_count;
     struct lock *lock;
+#endif
 } PTE; // total 32 bits
 
 typedef struct l2_page_table {
@@ -166,7 +170,12 @@ int as_define_stack(struct addrspace *as, vaddr_t *initstackptr);
 
 int load_elf(struct vnode *v, vaddr_t *entrypoint);
 
+#if COW
 void pte_inc_ref(PTE *pte);
 void pte_dec_ref(PTE *pte);
+#endif
+
+PTE *pte_copy(PTE *pte);
+PTE *new_pte(void);
 
 #endif /* _ADDRSPACE_H_ */

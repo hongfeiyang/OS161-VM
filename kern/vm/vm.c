@@ -12,76 +12,6 @@
 /* Place your page table functions here */
 
 static PTE *
-new_pte() {
-    PTE *pte = kmalloc(sizeof(*pte));
-    if (pte == NULL) {
-        return NULL;
-    }
-
-    vaddr_t vaddr = alloc_kpages(1);
-    if (vaddr == 0) {
-        return NULL;
-    }
-
-    // Zero fill the page
-    bzero((void *)vaddr, PAGE_SIZE);
-
-    paddr_t paddr = KVADDR_TO_PADDR(vaddr);
-    KASSERT((paddr & PAGE_FRAME) == paddr);
-
-    pte->frame = paddr;
-    pte->ref_count = 1;
-    pte->lock = lock_create("PTE lock");
-    if (pte->lock == NULL) {
-        kfree(pte);
-        return NULL;
-    }
-
-    return pte;
-}
-
-/*
- * Copy the given page that handles READONLY
- */
-static PTE *
-pte_copy_on_write(PTE *pte) {
-    if (pte == NULL) {
-        return NULL;
-    }
-    lock_acquire(pte->lock);
-    if (pte->ref_count == 1) {
-        // we can just mark this page as writeable
-        pte->frame |= TLBLO_DIRTY;
-        lock_release(pte->lock);
-        return pte;
-    }
-
-    PTE *new = new_pte();
-    if (new == NULL) {
-        lock_release(pte->lock);
-        return NULL;
-    }
-
-    // copy the contents of the old frame to the new frame
-    memcpy((void *)(PADDR_TO_KVADDR(new->frame) & PAGE_FRAME), (void *)(PADDR_TO_KVADDR(pte->frame) & PAGE_FRAME), PAGE_SIZE);
-
-    // copy offset bits
-    new->frame |= pte->frame & ~PAGE_FRAME;
-
-    // mark it as writeable
-    new->frame |= TLBLO_DIRTY;
-
-    // now we need to update the old page reference count
-    pte->ref_count--;
-
-    KASSERT(pte->ref_count >= 0);
-
-    lock_release(pte->lock);
-
-    return new;
-}
-
-static PTE *
 page_table_lookup(PageTable *page_table, vaddr_t vaddr) {
     int l1_index = L1_INDEX(vaddr);
     int l2_index = L2_INDEX(vaddr);
@@ -179,12 +109,18 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
     case VM_FAULT_WRITE:
         break;
     case VM_FAULT_READONLY:
+
+#if COW
         // we need to figure out if we need to do copy on write
         // so first thing we need to check is if we already have a page table entry
         // if we do, we need to check the reference count
         // if the reference count is greater than 1, we need to copy the page
         // and update the page table
         break;
+#else
+        return EFAULT;
+#endif
+
     default:
         return EINVAL;
     }
@@ -240,21 +176,22 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
      */
     if (pte) {
         paddr_t paddr = pte->frame;
-
+#if COW
         if (faulttype == VM_FAULT_READONLY) {
 
             // now we know it is made readonly for copy on write
-
-            PTE *new_entry = pte_copy_on_write(pte);
+            lock_acquire(pte->lock);
+            PTE *new_entry = pte_copy(pte);
             KASSERT(new_entry != NULL);
             KASSERT(new_entry->ref_count == 1);
+            lock_release(pte->lock);
             paddr = new_entry->frame;
             int result = page_table_add_entry(pt, faultaddress, new_entry);
             if (result) {
                 return result;
             }
         }
-
+#endif
         load_tlb(faultaddress, paddr, as->force_readwrite);
         return 0;
     }
