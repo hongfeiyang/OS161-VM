@@ -396,6 +396,55 @@ regions_identical(struct region *r1, struct region *r2) {
     return regions_identical(r1->next, r2->next);
 }
 
+// sort the regions by vbase
+static void
+sort_regions(struct region *regions) {
+    struct region *current = regions;
+    struct region *next = NULL;
+    while (current != NULL) {
+        next = current->next;
+        while (next != NULL) {
+            if (current->vbase > next->vbase) {
+                // swap
+                vaddr_t vbase = current->vbase;
+                vaddr_t vtop = current->vtop;
+                size_t npages = current->npages;
+                int readable = current->readable;
+                int writeable = current->writeable;
+                int executable = current->executable;
+
+                current->vbase = next->vbase;
+                current->vtop = next->vtop;
+                current->npages = next->npages;
+                current->readable = next->readable;
+                current->writeable = next->writeable;
+                current->executable = next->executable;
+
+                next->vbase = vbase;
+                next->vtop = vtop;
+                next->npages = npages;
+                next->readable = readable;
+                next->writeable = writeable;
+                next->executable = executable;
+            }
+            next = next->next;
+        }
+        current = current->next;
+    }
+}
+
+static int
+regions_have_overlap(struct region *regions) {
+    struct region *current = regions;
+    while (current->next != NULL) {
+        if (MAX(current->vbase, current->next->vbase) < MIN(current->vtop, current->next->vtop)) {
+            return 1;
+        }
+        current = current->next;
+    }
+    return 0;
+}
+
 static void
 free_region(struct region *region) {
     if (region->next != NULL) {
@@ -431,8 +480,8 @@ as_create(void) {
     as->regions = NULL;
     as->page_table = page_table_init();
     as->force_readwrite = 0;
-    as->heap = NULL;
-    as->stack = NULL;
+    as->heap_start = 0;
+    as->stack_start = 0;
 
     return as;
 }
@@ -463,21 +512,9 @@ as_copy(struct addrspace *old, struct addrspace **ret) {
 
     newas->force_readwrite = old->force_readwrite;
 
-#if OPT_SBRK
     // assign the heap and stack regions
-    // stack is the last region and heap is the second last region
-    struct region *current = newas->regions;
-    while (current->next != NULL) {
-        current = current->next;
-    }
-    newas->stack = current;
-    current = newas->regions;
-    while (current->next != newas->stack) {
-        current = current->next;
-    }
-    newas->heap = current;
-
-#endif
+    newas->heap_start = old->heap_start;
+    newas->stack_start = old->stack_start;
 
     *ret = newas;
     return 0;
@@ -493,8 +530,8 @@ as_destroy(struct addrspace *as) {
     as->regions = NULL;
     page_table_destroy(as->page_table);
     as->page_table = NULL;
-    as->stack = NULL;
-    as->heap = NULL;
+    as->stack_start = 0;
+    as->heap_start = 0;
     kfree(as);
     as = NULL;
 }
@@ -648,18 +685,9 @@ as_define_stack(struct addrspace *as, vaddr_t *stackptr) {
     }
 
     vaddr_t heap_base = topmost->vtop;
-    // heap initially does not have any pages
+    // we allocate 1 page for heap just for easy management
 
-    as_define_region(as, heap_base, 0, PF_R, PF_W, 0);
-
-    // now keep a reference to the heap region for convenience, it should be the last item in the linked list
-    current = as->regions;
-    while (current->next != NULL) {
-        current = current->next;
-    }
-    as->heap = current;
-    KASSERT(as->heap->vbase == heap_base);
-    KASSERT(as->heap->npages == 0);
+    as_define_region(as, heap_base, 1 * PAGE_SIZE, PF_R, PF_W, 0);
 
     // ELF does not contain a stack region because initially stack is empty
     // and it grows downwards
@@ -667,14 +695,34 @@ as_define_stack(struct addrspace *as, vaddr_t *stackptr) {
 
     // Stack region is read/write and not executable
     as_define_region(as, USERSTACK - YANG_VM_STACKPAGES * PAGE_SIZE, YANG_VM_STACKPAGES * PAGE_SIZE, PF_R, PF_W, 0);
+
+    sort_regions(as->regions);
+    // check that there is no overlap
+    KASSERT(!regions_have_overlap(as->regions));
+
+    // now keep a reference to the heap region for convenience
+    as->heap_start = heap_base;
+    struct region *heap = find_region(as, heap_base);
+    KASSERT(heap != NULL);
+    KASSERT(heap->vbase == as->heap_start);
+
     // keep a reference to the stack region for convenience
-    current = as->regions;
-    while (current->next != NULL) {
-        current = current->next;
-    }
-    as->stack = current;
-    KASSERT(as->stack->vbase == USERSTACK - YANG_VM_STACKPAGES * PAGE_SIZE);
-    KASSERT(as->stack->npages == YANG_VM_STACKPAGES);
+    as->stack_start = USERSTACK - YANG_VM_STACKPAGES * PAGE_SIZE;
+    struct region *stack = find_region(as, USERSTACK - YANG_VM_STACKPAGES * PAGE_SIZE);
+    KASSERT(stack != NULL);
+    KASSERT(stack->vbase == as->stack_start);
 
     return 0;
+}
+
+struct region *
+find_region(struct addrspace *as, vaddr_t vaddr) {
+    struct region *current_region = as->regions;
+    while (current_region != NULL) {
+        if (current_region->vbase <= vaddr && vaddr < current_region->vtop) {
+            return current_region;
+        }
+        current_region = current_region->next;
+    }
+    return NULL;
 }

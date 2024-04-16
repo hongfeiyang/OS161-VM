@@ -32,6 +32,7 @@
 
 #define OPT_COW 0
 #define OPT_SBRK 1
+#define OPT_MMAP 1
 
 /*
  * Address space structure and operations.
@@ -107,9 +108,8 @@ struct addrspace {
     struct region *regions;
     bool force_readwrite;
     PageTable *page_table;
-    struct region *heap;
-    struct region *stack;
-
+    vaddr_t heap_start;
+    vaddr_t stack_start;
 #endif
 };
 
@@ -189,5 +189,7 @@ void pte_destroy(PTE *pte);
 PTE *page_table_lookup(PageTable *pt, vaddr_t addr);
 int page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte);
 PTE *page_table_remove_entry(PageTable *page_table, vaddr_t vaddr);
+
+struct region *find_region(struct addrspace *as, vaddr_t vaddr);
 
 #endif /* _ADDRSPACE_H_ */

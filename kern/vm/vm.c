@@ -37,18 +37,6 @@ load_tlb(vaddr_t vaddr, paddr_t paddr, bool force_rw) {
     splx(spl);
 }
 
-static struct region *
-find_region(struct addrspace *as, vaddr_t vaddr) {
-    struct region *current_region = as->regions;
-    while (current_region != NULL) {
-        if (current_region->vbase <= vaddr && vaddr < current_region->vtop) {
-            return current_region;
-        }
-        current_region = current_region->next;
-    }
-    return NULL;
-}
-
 void
 vm_bootstrap(void) {
     /* Initialise any global components of your VM sub-system here.

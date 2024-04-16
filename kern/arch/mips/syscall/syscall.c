@@ -257,6 +257,16 @@ syscall(struct trapframe *tf) {
         err = sys_sbrk((ssize_t)tf->tf_a0, (vaddr_t *)&retval);
         break;
 
+    case SYS_mmap:
+        // void *mmap(void addr[.length], size_t length, int prot, int flags, int fd, off_t offset);
+        err = sys_mmap((vaddr_t)tf->tf_a0, (size_t)tf->tf_a1, (int)tf->tf_a2, (int)tf->tf_a3, (int)tf->tf_t0, (off_t)tf->tf_t1, (vaddr_t *)&retval);
+
+        break;
+
+    case SYS_munmap:
+        err = sys_munmap((vaddr_t)tf->tf_a0, (int *)&retval);
+        break;
+
     default:
         kprintf("Unknown syscall %d\n", callno);
         err = ENOSYS;

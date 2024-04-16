@@ -30,20 +30,27 @@ sys_sbrk(ssize_t amount, vaddr_t *retval) {
 #if OPT_SBRK
     struct addrspace *as;
     vaddr_t old_heap_end, new_heap_end;
+    struct region *heap = NULL;
+    struct region *stack = NULL;
 
     as = curproc->p_addrspace;
     if (as == NULL) {
         return ENOMEM;
     }
 
+    heap = find_region(as, as->heap_start);
+    KASSERT(heap != NULL);
+    stack = find_region(as, as->stack_start);
+    KASSERT(stack != NULL);
+
     // sbrk(0) should return end of heap
     if (amount == 0) {
-        *retval = as->heap->vtop;
+        *retval = heap->vtop;
         return 0;
     }
 
     // Calculate the new heap end, based on weather we are growing or shrinking, round up or down to the nearest page
-    old_heap_end = as->heap->vtop;
+    old_heap_end = heap->vtop;
     // make sure original is page aligned
     KASSERT(old_heap_end % PAGE_SIZE == 0);
     new_heap_end = old_heap_end + amount;
@@ -60,12 +67,12 @@ sys_sbrk(ssize_t amount, vaddr_t *retval) {
     KASSERT((new_heap_end - old_heap_end) / PAGE_SIZE * PAGE_SIZE == new_heap_end - old_heap_end);
 
     // make sure the new heap end does not go below the heap start
-    if (new_heap_end < as->heap->vbase) {
+    if (new_heap_end < heap->vbase) {
         return ENOMEM;
     }
 
     // make sure heap end does not grow into the stack
-    if (new_heap_end >= as->stack->vbase) {
+    if (new_heap_end >= stack->vbase) {
         return ENOMEM;
     }
 
@@ -103,10 +110,10 @@ sys_sbrk(ssize_t amount, vaddr_t *retval) {
     //     }
     // }
 
-    as->heap->vtop = new_heap_end;
-    as->heap->npages = (new_heap_end - as->heap->vbase) / PAGE_SIZE;
+    heap->vtop = new_heap_end;
+    heap->npages = (new_heap_end - heap->vbase) / PAGE_SIZE;
     // npages should be evenly divisible by PAGE_SIZE
-    KASSERT(as->heap->npages * PAGE_SIZE == new_heap_end - as->heap->vbase);
+    KASSERT(heap->npages * PAGE_SIZE == new_heap_end - heap->vbase);
     *retval = old_heap_end;
 
     return 0;
@@ -115,4 +122,43 @@ sys_sbrk(ssize_t amount, vaddr_t *retval) {
     (void)retval;
     return ENOSYS;
 #endif
+}
+
+int
+sys_mmap(vaddr_t addr, size_t length, int prot, int flags, int fd, off_t offset, vaddr_t *retval) {
+    (void)addr;
+    (void)length;
+    (void)prot;
+    (void)flags;
+    (void)fd;
+    (void)offset;
+    (void)retval;
+    return ENOSYS;
+    // #if OPT_MMAP
+    //     struct addrspace *as;
+    //     struct filetable *ft;
+    //     struct openfile *of;
+    //     struct vnode *vn;
+    //     struct region *region;
+    //     int result;
+    //     int i;
+    //     int npages;
+    //     vaddr_t vaddr;
+    //     size_t npages_rounded;
+    //     off_t filesize;
+    //     struct stat stat;
+
+    //     // we only support mapping the entire file
+
+    // #else
+
+    //     return ENOSYS;
+    // #endif
+}
+
+int
+sys_munmap(vaddr_t addr, int *retval) {
+    (void)addr;
+    (void)retval;
+    return ENOSYS;
 }
