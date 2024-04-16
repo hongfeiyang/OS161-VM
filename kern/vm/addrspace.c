@@ -50,33 +50,25 @@
  *
  */
 
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-
-static PageTable *
-page_table_init(void) {
-    PageTable *page_table = kmalloc(sizeof(PageTable));
-    if (page_table == NULL) {
-        return NULL;
-    }
-
-    for (int i = 0; i < 1 << L1_BITS; i++) {
-        page_table->tables[i] = NULL;
-    }
-
-    return page_table;
-}
-
 PTE *
 page_table_lookup(PageTable *page_table, vaddr_t vaddr) {
+
+    KASSERT(page_table != NULL);
+    KASSERT(page_table->lock != NULL);
+
     int l1_index = L1_INDEX(vaddr);
     int l2_index = L2_INDEX(vaddr);
 
+    lock_acquire(page_table->lock);
+
     if (page_table->tables[l1_index] == NULL) {
+        lock_release(page_table->lock);
         return NULL;
     }
 
     PTE *entry = page_table->tables[l1_index]->entries[l2_index];
+
+    lock_release(page_table->lock);
     return entry;
 }
 
@@ -84,13 +76,18 @@ int
 page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte) {
 
     KASSERT(pte != NULL);
+    KASSERT(page_table != NULL);
+    KASSERT(page_table->lock != NULL);
 
     int l1_index = L1_INDEX(vaddr);
     int l2_index = L2_INDEX(vaddr);
 
+    lock_acquire(page_table->lock);
+
     if (page_table->tables[l1_index] == NULL) {
         page_table->tables[l1_index] = kmalloc(sizeof(L2Table));
         if (page_table->tables[l1_index] == NULL) {
+            lock_release(page_table->lock);
             return ENOMEM;
         }
         for (int i = 0; i < 1 << L2_BITS; i++) {
@@ -101,6 +98,8 @@ page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte) {
     // so here we might replace it with a real page with ref count 1
     page_table->tables[l1_index]->entries[l2_index] = pte;
 
+    lock_release(page_table->lock);
+
     return 0;
 }
 
@@ -109,12 +108,17 @@ page_table_remove_entry(PageTable *page_table, vaddr_t vaddr) {
     int l1_index = L1_INDEX(vaddr);
     int l2_index = L2_INDEX(vaddr);
 
+    lock_acquire(page_table->lock);
+
     if (page_table->tables[l1_index] == NULL) {
+        lock_release(page_table->lock);
         return NULL;
     }
 
     PTE *entry = page_table->tables[l1_index]->entries[l2_index];
     page_table->tables[l1_index]->entries[l2_index] = NULL;
+
+    lock_release(page_table->lock);
 
     return entry;
 }
@@ -122,20 +126,25 @@ page_table_remove_entry(PageTable *page_table, vaddr_t vaddr) {
 void
 pte_destroy(PTE *pte) {
     KASSERT(pte != NULL);
+    KASSERT(pte->lock != NULL);
+
 #if OPT_COW
     KASSERT(pte->ref_count == 1);
 #endif
-
+    // keep a reference to the lock
+    struct lock *lock = pte->lock;
+    lock_acquire(lock);
     paddr_t frame = pte->frame;
     vaddr_t page = PADDR_TO_KVADDR(frame & PAGE_FRAME);
     free_kpages(page);
     pte->frame = 0;
 #if OPT_COW
-    lock_destroy(pte->lock);
     pte->ref_count = 0;
-    pte->lock = NULL;
 #endif
+    pte->lock = NULL;
     kfree(pte);
+    lock_release(lock);
+    lock_destroy(lock);
 }
 
 #if OPT_COW
@@ -143,23 +152,27 @@ void
 pte_dec_ref(PTE *pte) {
     KASSERT(pte != NULL);
     KASSERT(pte->lock != NULL);
-
     lock_acquire(pte->lock);
     KASSERT(pte->ref_count > 0);
     if (pte->ref_count > 1) {
         pte->ref_count--;
-        lock_release(pte->lock);
-    } else {
+    }
+
+    // if ref_count is 1, we can free the frame
+    if (pte->ref_count == 1) {
         lock_release(pte->lock);
         pte_destroy(pte);
+        return;
     }
+
+    lock_release(pte->lock);
 }
 void
 pte_inc_ref(PTE *pte) {
     KASSERT(pte != NULL);
-    KASSERT(pte->ref_count > 0);
-
+    KASSERT(pte->lock != NULL);
     lock_acquire(pte->lock);
+    KASSERT(pte->ref_count > 0);
     pte->ref_count++;
     pte->frame &= ~TLBLO_DIRTY; // mark the page as unwriteable, so it triggers a page fault on write
     lock_release(pte->lock);
@@ -185,13 +198,14 @@ new_pte() {
     KASSERT((paddr & PAGE_FRAME) == paddr);
 
     pte->frame = paddr;
-#if OPT_COW
-    pte->ref_count = 1;
     pte->lock = lock_create("PTE lock");
     if (pte->lock == NULL) {
         kfree(pte);
         return NULL;
     }
+
+#if OPT_COW
+    pte->ref_count = 1;
 #endif
 
     return pte;
@@ -203,22 +217,27 @@ new_pte() {
 PTE *
 pte_copy(PTE *pte) {
     KASSERT(pte != NULL);
+    KASSERT(pte->lock != NULL);
+
+    lock_acquire(pte->lock);
 
 #if OPT_COW
     if (pte->ref_count == 1) {
         // we can just mark this page as writeable
         pte->frame |= TLBLO_DIRTY;
+        lock_release(pte->lock);
         return pte;
     }
 #endif
 
     PTE *new = new_pte();
     if (new == NULL) {
+        lock_release(pte->lock);
         return NULL;
     }
 
     // copy the contents of the old frame to the new frame
-    memcpy((void *)(PADDR_TO_KVADDR(new->frame) & PAGE_FRAME), (void *)(PADDR_TO_KVADDR(pte->frame) & PAGE_FRAME), PAGE_SIZE);
+    memmove((void *)(PADDR_TO_KVADDR(new->frame) & PAGE_FRAME), (void *)(PADDR_TO_KVADDR(pte->frame) & PAGE_FRAME), PAGE_SIZE);
 
     // copy offset bits
     new->frame |= pte->frame & ~PAGE_FRAME;
@@ -232,18 +251,48 @@ pte_copy(PTE *pte) {
 
     KASSERT(pte->ref_count > 0);
 #endif
+    lock_release(pte->lock);
 
     return new;
 }
 
+static PageTable *
+page_table_init(void) {
+    PageTable *page_table = kmalloc(sizeof(PageTable));
+    if (page_table == NULL) {
+        return NULL;
+    }
+
+    for (int i = 0; i < 1 << L1_BITS; i++) {
+        page_table->tables[i] = NULL;
+    }
+
+    struct lock *lock = lock_create("Page table lock");
+    if (lock == NULL) {
+        kfree(page_table);
+        return NULL;
+    }
+
+    page_table->lock = lock;
+
+    return page_table;
+}
+
 static void
 page_table_destroy(PageTable *page_table) {
+
+    KASSERT(page_table != NULL);
+
+    // keep a reference to the lock
+    struct lock *lock = page_table->lock;
+    lock_acquire(lock);
+
     for (int i = 0; i < 1 << L1_BITS; i++) {
         if (page_table->tables[i] != NULL) {
             for (int j = 0; j < 1 << L2_BITS; j++) {
                 if (page_table->tables[i]->entries[j] != NULL) {
 #if OPT_COW
-                    // decrement ref_count and free the frame if ref_count is 0
+                    // decrement ref_count and free the frame if ref_count is 1
                     pte_dec_ref(page_table->tables[i]->entries[j]);
 #else
                     pte_destroy(page_table->tables[i]->entries[j]);
@@ -254,7 +303,10 @@ page_table_destroy(PageTable *page_table) {
             page_table->tables[i] = NULL;
         }
     }
+    page_table->lock = NULL;
     kfree(page_table);
+    lock_release(lock);
+    lock_destroy(lock);
 }
 
 // for fork, copy page table and alloc new frames
@@ -265,23 +317,26 @@ page_table_copy(PageTable *old) {
         return NULL;
     }
 
+    lock_acquire(old->lock);
     for (int i = 0; i < 1 << L1_BITS; i++) {
         if (old->tables[i] != NULL) {
             new->tables[i] = kmalloc(sizeof(*new->tables[i]));
             if (new->tables[i] == NULL) {
+                lock_release(old->lock);
                 page_table_destroy(new);
                 return NULL;
             }
 
             for (int j = 0; j < 1 << L2_BITS; j++) {
-                // only copy reference here, we have copy-on-write in vm
                 if (old->tables[i]->entries[j] != NULL) {
 #if OPT_COW
+                    // only copy reference here, we have copy-on-write in vm
                     pte_inc_ref(old->tables[i]->entries[j]);
                     new->tables[i]->entries[j] = old->tables[i]->entries[j];
 #else
                     new->tables[i]->entries[j] = pte_copy(old->tables[i]->entries[j]);
                     if (new->tables[i]->entries[j] == NULL) {
+                        lock_release(old->lock);
                         page_table_destroy(new);
                         return NULL;
                     }
@@ -290,10 +345,9 @@ page_table_copy(PageTable *old) {
                     new->tables[i]->entries[j] = NULL;
                 }
             }
-        } else {
-            new->tables[i] = NULL;
         }
     }
+    lock_release(old->lock);
 
     return new;
 }
@@ -377,6 +431,8 @@ as_create(void) {
     as->regions = NULL;
     as->page_table = page_table_init();
     as->force_readwrite = 0;
+    as->heap = NULL;
+    as->stack = NULL;
 
     return as;
 }
@@ -437,6 +493,8 @@ as_destroy(struct addrspace *as) {
     as->regions = NULL;
     page_table_destroy(as->page_table);
     as->page_table = NULL;
+    as->stack = NULL;
+    as->heap = NULL;
     kfree(as);
     as = NULL;
 }
@@ -580,6 +638,7 @@ as_define_stack(struct addrspace *as, vaddr_t *stackptr) {
     // we find the top of the top most region and add heap region after that and just below the stack
 
     struct region *current = as->regions;
+
     struct region *topmost = current;
     while (current != NULL) {
         if (current->vtop > topmost->vtop) {

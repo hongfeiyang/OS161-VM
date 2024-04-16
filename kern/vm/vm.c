@@ -143,11 +143,9 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
         if (faulttype == VM_FAULT_READONLY) {
 
             // now we know it is made readonly for copy on write
-            lock_acquire(pte->lock);
             PTE *new_entry = pte_copy(pte);
             KASSERT(new_entry != NULL);
             KASSERT(new_entry->ref_count == 1);
-            lock_release(pte->lock);
             paddr = new_entry->frame;
             int result = page_table_add_entry(pt, faultaddress, new_entry);
             if (result) {

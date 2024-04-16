@@ -56,6 +56,9 @@ struct vnode;
 #define L1_INDEX(x) ((x) >> (L2_BITS + OFFSET_BITS))
 #define L2_INDEX(x) (((x) >> OFFSET_BITS) & ((1 << L2_BITS) - 1))
 
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+
 #define YANG_VM_STACKPAGES 18
 
 struct region {
@@ -72,9 +75,9 @@ struct region {
 
 typedef struct page_table_entry {
     paddr_t frame;
+    struct lock *lock;
 #if OPT_COW
     int ref_count;
-    struct lock *lock;
 #endif
 } PTE; // total 32 bits
 
@@ -86,6 +89,7 @@ typedef struct l2_page_table {
 
 typedef struct page_table {
     L2Table *tables[1 << L1_BITS]; // Pointers to second-level page tables
+    struct lock *lock;
 } PageTable;
 // A first level page table has 1 << 11 = 2048 entries
 // Each entry is 4 bytes, so 2048 * 4 = 8KB
@@ -103,10 +107,8 @@ struct addrspace {
     struct region *regions;
     bool force_readwrite;
     PageTable *page_table;
-#if OPT_SBRK
     struct region *heap;
     struct region *stack;
-#endif
 
 #endif
 };
