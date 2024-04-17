@@ -17,7 +17,6 @@
 #include <filetable.h>
 #include <syscall.h>
 #include <addrspace.h>
-#include <mips/tlb.h>
 /*
  * sbrk()
  * If successful, sbrk() returns the previous break value.

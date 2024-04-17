@@ -8,6 +8,11 @@
 #include <spl.h>
 #include <proc.h>
 #include <synch.h>
+#include <vfs.h>
+#include <vnode.h>
+#include <openfile.h>
+#include <current.h>
+#include <uio.h>
 
 /* Place your page table functions here */
 
@@ -184,6 +189,32 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
         // unimplemented
         return ENOSYS;
     }
+
+    if (current_region->type == FILE_REGION) {
+        // read the file
+        int fd = current_region->fd;
+        off_t offset = current_region->offset;
+
+        // get the open file from the file table
+        struct openfile *file;
+        int result = filetable_get(curproc->p_filetable, fd, &file);
+        if (result) {
+            return result;
+        }
+        // make sure the file is open
+        if (file == NULL) {
+            return EBADF;
+        }
+        // load the 4kb range requested by this fault address from this file using uio
+        struct iovec iov;
+        struct uio u;
+        uio_kinit(&iov, &u, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE, offset, UIO_READ);
+        result = VOP_READ(file->of_vnode, &u);
+        if (result) {
+            return result;
+        }
+    }
+
     // Add the new page table entry to the page table
     int result = page_table_add_entry(pt, faultaddress, new_entry);
     if (result) {
