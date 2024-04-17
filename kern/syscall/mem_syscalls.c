@@ -158,6 +158,19 @@ sys_munmap(vaddr_t addr, int *retval) {
     // free the region
     region_destroy(region);
 
+    PageTable *pt = as->page_table;
+
+    // allgn starting address
+    addr = addr & ~(PAGE_SIZE - 1);
+    // dealloc our pages from page table and free the frames
+    for (vaddr_t i = addr; i < addr + region->npages * PAGE_SIZE; i += PAGE_SIZE) {
+        PTE *pte = page_table_lookup(pt, i);
+        if (pte) {
+            page_table_remove_entry(pt, i);
+            pte_destroy(pte);
+        }
+    }
+
     *retval = 0;
     return 0;
 

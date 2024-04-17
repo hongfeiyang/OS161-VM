@@ -12,6 +12,7 @@
 #include <vnode.h>
 #include <openfile.h>
 #include <current.h>
+#include <filetable.h>
 #include <uio.h>
 
 /* Place your page table functions here */
@@ -208,8 +209,16 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
         // load the 4kb range requested by this fault address from this file using uio
         struct iovec iov;
         struct uio u;
-        uio_kinit(&iov, &u, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE, offset, UIO_READ);
-        result = VOP_READ(file->of_vnode, &u);
+
+        // now figure out this is a read or write fault
+        if (faulttype == VM_FAULT_READ) {
+            uio_kinit(&iov, &u, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE, offset, UIO_READ);
+            result = VOP_READ(file->of_vnode, &u);
+        } else if (faulttype == VM_FAULT_WRITE) {
+            uio_kinit(&iov, &u, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE, offset, UIO_WRITE);
+            result = VOP_WRITE(file->of_vnode, &u);
+        }
+
         if (result) {
             return result;
         }

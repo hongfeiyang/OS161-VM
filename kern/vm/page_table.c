@@ -90,7 +90,7 @@ pte_destroy(PTE *pte) {
     KASSERT(pte != NULL);
     KASSERT(pte->lock != NULL);
 
-#if OPT_COW
+#if OPT_COW & !OPT_MMAP
     KASSERT(pte->ref_count == 1);
 #endif
     struct lock *lock = pte->lock;
