@@ -155,21 +155,25 @@ sys_munmap(vaddr_t addr, int *retval) {
     // remove the region from the address space
     regions_remove_region(as->all_regions, region);
 
-    // free the region
-    region_destroy(region);
+    // make sure we remove the right region and the linked list is not corrupted
+    KASSERT(region->prev->next == region->next);
+    KASSERT(region->next->prev == region->prev);
 
     PageTable *pt = as->page_table;
 
-    // allgn starting address
-    addr = addr & ~(PAGE_SIZE - 1);
     // dealloc our pages from page table and free the frames
-    for (vaddr_t i = addr; i < addr + region->npages * PAGE_SIZE; i += PAGE_SIZE) {
+    for (vaddr_t i = region->vbase; i < region->vtop; i += PAGE_SIZE) {
         PTE *pte = page_table_lookup(pt, i);
         if (pte) {
             page_table_remove_entry(pt, i);
             pte_destroy(pte);
         }
     }
+    // free the region
+    region_destroy(region);
+
+    // clear file region translations, we are lazy and just flush the whole tlb
+    flush_tlb();
 
     *retval = 0;
     return 0;

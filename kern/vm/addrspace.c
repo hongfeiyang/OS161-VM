@@ -364,7 +364,7 @@ regions_have_overlap(struct region *regions) {
     return 0;
 }
 
-static void
+void
 flush_tlb(void) {
     int spl = splhigh();
 

@@ -194,6 +194,8 @@ int as_define_stack(struct addrspace *as, vaddr_t *initstackptr);
 
 int load_elf(struct vnode *v, vaddr_t *entrypoint);
 
+void flush_tlb(void);
+
 #if OPT_COW
 void pte_inc_ref(PTE *pte);
 void pte_dec_ref(PTE *pte);
