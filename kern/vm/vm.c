@@ -95,7 +95,7 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
      * we need to look up this address in regions
      */
 
-    struct region *current_region = find_region(as, faultaddress);
+    struct region *current_region = find_region(as->all_regions, faultaddress);
 
     if (current_region == NULL) {
         /*
@@ -131,7 +131,7 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
         if (faulttype == VM_FAULT_READONLY) {
 
             // now we know it is made readonly for copy on write
-            PTE *new_entry = pte_copy(pte);
+            PTE *new_entry = pte_copy_on_write(pte);
             KASSERT(new_entry != NULL);
             KASSERT(new_entry->ref_count == 1);
             paddr = new_entry->frame;
@@ -141,6 +141,7 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
             }
         }
 #endif
+
         load_tlb(faultaddress, paddr, as->force_readwrite);
         return 0;
     }
@@ -166,6 +167,23 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
     // commit the changes
     new_entry->frame = paddr;
 
+    switch (current_region->type) {
+    case UNNAMED_REGION:
+    case HEAP_REGION:
+    case FILE_REGION:
+#if OPT_COW
+        new_entry->shared = 1;
+#endif
+        break;
+    case STACK_REGION:
+#if OPT_COW
+        new_entry->shared = 0;
+#endif
+        break;
+    default:
+        // unimplemented
+        return ENOSYS;
+    }
     // Add the new page table entry to the page table
     int result = page_table_add_entry(pt, faultaddress, new_entry);
     if (result) {

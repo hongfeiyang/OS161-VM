@@ -31,17 +31,17 @@ sys_sbrk(ssize_t amount, vaddr_t *retval) {
     struct addrspace *as;
     vaddr_t old_heap_end, new_heap_end;
     struct region *heap = NULL;
-    struct region *stack = NULL;
+    struct region *above_heap = NULL; // region that is above heap. can be stack or can be a memory mapped file
 
     as = curproc->p_addrspace;
     if (as == NULL) {
         return ENOMEM;
     }
 
-    heap = find_region(as, as->heap_start);
+    heap = find_region_by_vbase(as->all_regions, as->heap_start);
     KASSERT(heap != NULL);
-    stack = find_region(as, as->stack_start);
-    KASSERT(stack != NULL);
+    above_heap = heap->next;
+    KASSERT(above_heap != NULL);
 
     // sbrk(0) should return end of heap
     if (amount == 0) {
@@ -72,43 +72,9 @@ sys_sbrk(ssize_t amount, vaddr_t *retval) {
     }
 
     // make sure heap end does not grow into the stack
-    if (new_heap_end >= stack->vbase) {
+    if (new_heap_end >= above_heap->vbase) {
         return ENOMEM;
     }
-
-    // // now we have checked range
-    // // we need to check if we need to grow or shrink the heap
-    // if (amount > 0) {
-    //     // grow the heap
-    //     struct page_table *page_table = as->page_table;
-    //     vaddr_t vaddr = as->heap->vtop;
-    //     vaddr_t vaddr_end = new_heap_end;
-    //     while (vaddr < vaddr_end) {
-    //         struct page_table_entry *pte = page_table_lookup(page_table, vaddr);
-    //         if (pte == NULL) {
-    //             pte = new_pte();
-    //             pte->frame |= TLBLO_DIRTY;
-    //             // TODO: COW
-    //             page_table_add_entry(page_table, vaddr, pte);
-    //         }
-    //         vaddr += PAGE_SIZE;
-    //     }
-    // } else {
-    //     // shrink the heap
-    //     struct page_table *page_table = as->page_table;
-    //     vaddr_t vaddr = new_heap_end;
-    //     vaddr_t vaddr_end = as->heap->vtop;
-    //     while (vaddr < vaddr_end) {
-    //         struct page_table_entry *pte = page_table_lookup(page_table, vaddr);
-    //         if (pte != NULL) {
-    //             // TODO: COW
-    //             PTE *removed = page_table_remove_entry(page_table, vaddr);
-    //             KASSERT(removed != NULL);
-    //             pte_destroy(removed);
-    //         }
-    //         vaddr += PAGE_SIZE;
-    //     }
-    // }
 
     heap->vtop = new_heap_end;
     heap->npages = (new_heap_end - heap->vbase) / PAGE_SIZE;
@@ -125,40 +91,80 @@ sys_sbrk(ssize_t amount, vaddr_t *retval) {
 }
 
 int
-sys_mmap(vaddr_t addr, size_t length, int prot, int flags, int fd, off_t offset, vaddr_t *retval) {
-    (void)addr;
+sys_mmap(size_t length, int prot, int fd, off_t offset, vaddr_t *retval) {
+
+#if OPT_MMAP
+
+    if (length == 0) {
+        return EINVAL;
+    }
+
+    // offset must be page aligned
+    if (offset % PAGE_SIZE != 0) {
+        return EINVAL;
+    }
+
+    // make sure we can open the file
+    struct openfile *file;
+    int result = filetable_get(curproc->p_filetable, fd, &file);
+    if (result) {
+        return result;
+    }
+
+    // make sure the file is open
+    if (file == NULL) {
+        return EBADF;
+    }
+
+    // map the file into the address space
+    struct addrspace *as = curproc->p_addrspace;
+    struct region *region = alloc_file_region(as, length, prot & PROT_READ, prot & PROT_WRITE, 0);
+    if (region == NULL) {
+        return ENOMEM;
+    }
+    region->fd = fd;
+    region->offset = offset;
+
+    *retval = region->vbase;
+    return 0;
+
+#else
     (void)length;
     (void)prot;
-    (void)flags;
     (void)fd;
     (void)offset;
     (void)retval;
     return ENOSYS;
-    // #if OPT_MMAP
-    //     struct addrspace *as;
-    //     struct filetable *ft;
-    //     struct openfile *of;
-    //     struct vnode *vn;
-    //     struct region *region;
-    //     int result;
-    //     int i;
-    //     int npages;
-    //     vaddr_t vaddr;
-    //     size_t npages_rounded;
-    //     off_t filesize;
-    //     struct stat stat;
-
-    //     // we only support mapping the entire file
-
-    // #else
-
-    //     return ENOSYS;
-    // #endif
+#endif
 }
 
 int
 sys_munmap(vaddr_t addr, int *retval) {
+#if OPT_MMAP
+
+    struct addrspace *as = curproc->p_addrspace;
+    struct region *region = find_region_by_vbase(as->all_regions, addr);
+    if (region == NULL) {
+        return EINVAL;
+    }
+
+    // make sure the region is a file region
+    if (region->type != FILE_REGION) {
+        return EINVAL;
+    }
+
+    // remove the region from the address space
+    regions_remove_region(as->all_regions, region);
+
+    // free the region
+    region_destroy(region);
+
+    *retval = 0;
+    return 0;
+
+#else
     (void)addr;
     (void)retval;
     return ENOSYS;
+#endif
 }

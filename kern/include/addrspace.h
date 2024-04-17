@@ -30,7 +30,7 @@
 #ifndef _ADDRSPACE_H_
 #define _ADDRSPACE_H_
 
-#define OPT_COW 0
+#define OPT_COW 1
 #define OPT_SBRK 1
 #define OPT_MMAP 1
 
@@ -62,6 +62,11 @@ struct vnode;
 
 #define YANG_VM_STACKPAGES 18
 
+#define UNNAMED_REGION 0
+#define HEAP_REGION 1
+#define STACK_REGION 2
+#define FILE_REGION 3
+
 struct region {
     vaddr_t vbase;
     size_t npages;
@@ -70,17 +75,23 @@ struct region {
     unsigned int writeable : 1;
     unsigned int executable : 1;
     struct region *next;
+    struct region *prev;
+    int type;
+#if OPT_MMAP
+    int fd;       // file descriptor
+    off_t offset; // offset where the mapping starts
+#endif
 };
 
-// How many pages are we going to have for one page table?
-
+// Page Table Entry
 typedef struct page_table_entry {
     paddr_t frame;
     struct lock *lock;
 #if OPT_COW
-    int ref_count;
+    unsigned int shared : 1; // shared means it will be copy on write
+    int ref_count;           // how many references to this page, for shared page this could be more than 1
 #endif
-} PTE; // total 32 bits
+} PTE;
 
 typedef struct l2_page_table {
     PTE *entries[1 << L2_BITS];
@@ -95,6 +106,11 @@ typedef struct page_table {
 // A first level page table has 1 << 11 = 2048 entries
 // Each entry is 4 bytes, so 2048 * 4 = 8KB
 
+typedef struct regions {
+    struct region *head;
+    struct region *tail;
+} Regions;
+
 struct addrspace {
 #if OPT_DUMBVM
     vaddr_t as_vbase1;
@@ -105,7 +121,7 @@ struct addrspace {
     size_t as_npages2;
     paddr_t as_stackpbase;
 #else
-    struct region *regions;
+    Regions *all_regions;
     bool force_readwrite;
     PageTable *page_table;
     vaddr_t heap_start;
@@ -183,13 +199,30 @@ void pte_inc_ref(PTE *pte);
 void pte_dec_ref(PTE *pte);
 #endif
 
-PTE *pte_copy(PTE *pte);
 PTE *new_pte(void);
 void pte_destroy(PTE *pte);
+PTE *pte_copy(PTE *pte);
+#if OPT_COW
+PTE *pte_copy_on_write(PTE *pte);
+#endif
+
+PageTable *page_table_init(void);
+void page_table_destroy(PageTable *page_table);
+PageTable *page_table_copy(PageTable *old);
 PTE *page_table_lookup(PageTable *pt, vaddr_t addr);
 int page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte);
 PTE *page_table_remove_entry(PageTable *page_table, vaddr_t vaddr);
 
-struct region *find_region(struct addrspace *as, vaddr_t vaddr);
+Regions *regions_create(void);
+Regions *regions_copy(Regions *old);
+void regions_remove_region(Regions *regions, struct region *region);
+void regions_destroy(Regions *regions);
+void region_destroy(struct region *region);
+void regions_insert(Regions *regions, struct region *region);
+struct region *find_region(Regions *regions, vaddr_t vaddr);
+struct region *find_region_by_vbase(Regions *regions, vaddr_t vbase);
+#if OPT_MMAP
+struct region *alloc_file_region(struct addrspace *as, size_t memsize, int readable, int writeable, int executable);
+#endif
 
 #endif /* _ADDRSPACE_H_ */

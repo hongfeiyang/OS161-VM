@@ -258,9 +258,10 @@ syscall(struct trapframe *tf) {
         break;
 
     case SYS_mmap:
-        // void *mmap(void addr[.length], size_t length, int prot, int flags, int fd, off_t offset);
-        err = sys_mmap((vaddr_t)tf->tf_a0, (size_t)tf->tf_a1, (int)tf->tf_a2, (int)tf->tf_a3, (int)tf->tf_t0, (off_t)tf->tf_t1, (vaddr_t *)&retval);
-
+        // prototype:
+        // void *mmap(size_t length, int prot, int fd, off_t offset);
+        // int munmap(void *addr);
+        err = sys_mmap((size_t)tf->tf_a0, (int)tf->tf_a1, (int)tf->tf_a2, (off_t)tf->tf_a3, (vaddr_t *)&retval);
         break;
 
     case SYS_munmap:

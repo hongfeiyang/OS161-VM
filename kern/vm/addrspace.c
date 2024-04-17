@@ -50,310 +50,101 @@
  *
  */
 
-PTE *
-page_table_lookup(PageTable *page_table, vaddr_t vaddr) {
-
-    KASSERT(page_table != NULL);
-    KASSERT(page_table->lock != NULL);
-
-    int l1_index = L1_INDEX(vaddr);
-    int l2_index = L2_INDEX(vaddr);
-
-    lock_acquire(page_table->lock);
-
-    if (page_table->tables[l1_index] == NULL) {
-        lock_release(page_table->lock);
+Regions *
+regions_create(void) {
+    Regions *regions = kmalloc(sizeof(Regions));
+    if (regions == NULL) {
         return NULL;
     }
 
-    PTE *entry = page_table->tables[l1_index]->entries[l2_index];
+    regions->head = NULL;
+    regions->tail = NULL;
 
-    lock_release(page_table->lock);
-    return entry;
-}
-
-int
-page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte) {
-
-    KASSERT(pte != NULL);
-    KASSERT(page_table != NULL);
-    KASSERT(page_table->lock != NULL);
-
-    int l1_index = L1_INDEX(vaddr);
-    int l2_index = L2_INDEX(vaddr);
-
-    lock_acquire(page_table->lock);
-
-    if (page_table->tables[l1_index] == NULL) {
-        page_table->tables[l1_index] = kmalloc(sizeof(L2Table));
-        if (page_table->tables[l1_index] == NULL) {
-            lock_release(page_table->lock);
-            return ENOMEM;
-        }
-        for (int i = 0; i < 1 << L2_BITS; i++) {
-            page_table->tables[l1_index]->entries[i] = NULL;
-        }
-    }
-    // Potentially we can have a reference here to some PTE in other page tables
-    // so here we might replace it with a real page with ref count 1
-    page_table->tables[l1_index]->entries[l2_index] = pte;
-
-    lock_release(page_table->lock);
-
-    return 0;
-}
-
-PTE *
-page_table_remove_entry(PageTable *page_table, vaddr_t vaddr) {
-    int l1_index = L1_INDEX(vaddr);
-    int l2_index = L2_INDEX(vaddr);
-
-    lock_acquire(page_table->lock);
-
-    if (page_table->tables[l1_index] == NULL) {
-        lock_release(page_table->lock);
-        return NULL;
-    }
-
-    PTE *entry = page_table->tables[l1_index]->entries[l2_index];
-    page_table->tables[l1_index]->entries[l2_index] = NULL;
-
-    lock_release(page_table->lock);
-
-    return entry;
+    return regions;
 }
 
 void
-pte_destroy(PTE *pte) {
-    KASSERT(pte != NULL);
-    KASSERT(pte->lock != NULL);
-
-#if OPT_COW
-    KASSERT(pte->ref_count == 1);
+region_destroy(struct region *region) {
+    KASSERT(region != NULL);
+    region->next = NULL;
+    region->prev = NULL;
+    region->vbase = 0;
+    region->npages = 0;
+    region->vtop = 0;
+    region->readable = 0;
+    region->writeable = 0;
+    region->executable = 0;
+    region->type = UNNAMED_REGION;
+#if OPT_MMAP
+    region->fd = -1;
+    region->offset = 0;
 #endif
-    // keep a reference to the lock
-    struct lock *lock = pte->lock;
-    lock_acquire(lock);
-    paddr_t frame = pte->frame;
-    vaddr_t page = PADDR_TO_KVADDR(frame & PAGE_FRAME);
-    free_kpages(page);
-    pte->frame = 0;
-#if OPT_COW
-    pte->ref_count = 0;
-#endif
-    pte->lock = NULL;
-    kfree(pte);
-    lock_release(lock);
-    lock_destroy(lock);
+    kfree(region);
 }
 
-#if OPT_COW
 void
-pte_dec_ref(PTE *pte) {
-    KASSERT(pte != NULL);
-    KASSERT(pte->lock != NULL);
-    lock_acquire(pte->lock);
-    KASSERT(pte->ref_count > 0);
-    if (pte->ref_count > 1) {
-        pte->ref_count--;
+regions_destroy(Regions *regions) {
+    KASSERT(regions != NULL);
+    struct region *current = regions->head;
+    while (current != NULL) {
+        struct region *next = current->next;
+        region_destroy(current);
+        current = next;
     }
-
-    // if ref_count is 1, we can free the frame
-    if (pte->ref_count == 1) {
-        lock_release(pte->lock);
-        pte_destroy(pte);
-        return;
-    }
-
-    lock_release(pte->lock);
+    regions->head = NULL;
+    regions->tail = NULL;
+    kfree(regions);
 }
+
 void
-pte_inc_ref(PTE *pte) {
-    KASSERT(pte != NULL);
-    KASSERT(pte->lock != NULL);
-    lock_acquire(pte->lock);
-    KASSERT(pte->ref_count > 0);
-    pte->ref_count++;
-    pte->frame &= ~TLBLO_DIRTY; // mark the page as unwriteable, so it triggers a page fault on write
-    lock_release(pte->lock);
-}
-#endif
+regions_insert(Regions *regions, struct region *region) {
+    KASSERT(regions != NULL);
+    KASSERT(region != NULL);
 
-PTE *
-new_pte() {
-    PTE *pte = kmalloc(sizeof(*pte));
-    if (pte == NULL) {
-        return NULL;
+    if (regions->head == NULL) {
+        KASSERT(regions->tail == NULL);
+        regions->head = region;
+        regions->tail = region;
+    } else {
+        KASSERT(regions->tail != NULL);
+        regions->tail->next = region;
+        region->prev = regions->tail;
+        regions->tail = region;
     }
-
-    vaddr_t vaddr = alloc_kpages(1);
-    if (vaddr == 0) {
-        return NULL;
-    }
-
-    // Zero fill the page
-    bzero((void *)vaddr, PAGE_SIZE);
-
-    paddr_t paddr = KVADDR_TO_PADDR(vaddr);
-    KASSERT((paddr & PAGE_FRAME) == paddr);
-
-    pte->frame = paddr;
-    pte->lock = lock_create("PTE lock");
-    if (pte->lock == NULL) {
-        kfree(pte);
-        return NULL;
-    }
-
-#if OPT_COW
-    pte->ref_count = 1;
-#endif
-
-    return pte;
+    KASSERT(regions->head != NULL);
+    KASSERT(regions->tail != NULL);
 }
 
-/*
- * Copy the given page that handles READONLY
- */
-PTE *
-pte_copy(PTE *pte) {
-    KASSERT(pte != NULL);
-    KASSERT(pte->lock != NULL);
+void
+regions_remove_region(Regions *regions, struct region *region) {
+    KASSERT(regions != NULL);
+    KASSERT(region != NULL);
+    // make sure the region is in the list
+    KASSERT(regions->head != NULL);
+    KASSERT(regions->tail != NULL);
 
-    lock_acquire(pte->lock);
+    // region's prev next must point to this region
+    KASSERT(region->prev->next == region);
+    // region's next prev must point to this region
+    KASSERT(region->next->prev == region);
 
-#if OPT_COW
-    if (pte->ref_count == 1) {
-        // we can just mark this page as writeable
-        pte->frame |= TLBLO_DIRTY;
-        lock_release(pte->lock);
-        return pte;
+    if (region->prev != NULL) {
+        region->prev->next = region->next;
     }
-#endif
-
-    PTE *new = new_pte();
-    if (new == NULL) {
-        lock_release(pte->lock);
-        return NULL;
+    if (region->next != NULL) {
+        region->next->prev = region->prev;
     }
 
-    // copy the contents of the old frame to the new frame
-    memmove((void *)(PADDR_TO_KVADDR(new->frame) & PAGE_FRAME), (void *)(PADDR_TO_KVADDR(pte->frame) & PAGE_FRAME), PAGE_SIZE);
-
-    // copy offset bits
-    new->frame |= pte->frame & ~PAGE_FRAME;
-
-    // mark it as writeable
-    new->frame |= TLBLO_DIRTY;
-
-#if OPT_COW
-    // now we need to update the old page reference count
-    pte->ref_count--;
-
-    KASSERT(pte->ref_count > 0);
-#endif
-    lock_release(pte->lock);
-
-    return new;
-}
-
-static PageTable *
-page_table_init(void) {
-    PageTable *page_table = kmalloc(sizeof(PageTable));
-    if (page_table == NULL) {
-        return NULL;
+    if (regions->head == region) {
+        regions->head = region->next;
     }
-
-    for (int i = 0; i < 1 << L1_BITS; i++) {
-        page_table->tables[i] = NULL;
+    if (regions->tail == region) {
+        regions->tail = region->prev;
     }
-
-    struct lock *lock = lock_create("Page table lock");
-    if (lock == NULL) {
-        kfree(page_table);
-        return NULL;
-    }
-
-    page_table->lock = lock;
-
-    return page_table;
-}
-
-static void
-page_table_destroy(PageTable *page_table) {
-
-    KASSERT(page_table != NULL);
-
-    // keep a reference to the lock
-    struct lock *lock = page_table->lock;
-    lock_acquire(lock);
-
-    for (int i = 0; i < 1 << L1_BITS; i++) {
-        if (page_table->tables[i] != NULL) {
-            for (int j = 0; j < 1 << L2_BITS; j++) {
-                if (page_table->tables[i]->entries[j] != NULL) {
-#if OPT_COW
-                    // decrement ref_count and free the frame if ref_count is 1
-                    pte_dec_ref(page_table->tables[i]->entries[j]);
-#else
-                    pte_destroy(page_table->tables[i]->entries[j]);
-#endif
-                }
-            }
-            kfree(page_table->tables[i]);
-            page_table->tables[i] = NULL;
-        }
-    }
-    page_table->lock = NULL;
-    kfree(page_table);
-    lock_release(lock);
-    lock_destroy(lock);
-}
-
-// for fork, copy page table and alloc new frames
-static PageTable *
-page_table_copy(PageTable *old) {
-    PageTable *new = page_table_init();
-    if (new == NULL) {
-        return NULL;
-    }
-
-    lock_acquire(old->lock);
-    for (int i = 0; i < 1 << L1_BITS; i++) {
-        if (old->tables[i] != NULL) {
-            new->tables[i] = kmalloc(sizeof(*new->tables[i]));
-            if (new->tables[i] == NULL) {
-                lock_release(old->lock);
-                page_table_destroy(new);
-                return NULL;
-            }
-
-            for (int j = 0; j < 1 << L2_BITS; j++) {
-                if (old->tables[i]->entries[j] != NULL) {
-#if OPT_COW
-                    // only copy reference here, we have copy-on-write in vm
-                    pte_inc_ref(old->tables[i]->entries[j]);
-                    new->tables[i]->entries[j] = old->tables[i]->entries[j];
-#else
-                    new->tables[i]->entries[j] = pte_copy(old->tables[i]->entries[j]);
-                    if (new->tables[i]->entries[j] == NULL) {
-                        lock_release(old->lock);
-                        page_table_destroy(new);
-                        return NULL;
-                    }
-#endif
-                } else {
-                    new->tables[i]->entries[j] = NULL;
-                }
-            }
-        }
-    }
-    lock_release(old->lock);
-
-    return new;
 }
 
 static struct region *
-regions_copy(struct region *old) {
+region_copy(struct region *old) {
     struct region *new = kmalloc(sizeof(struct region));
     if (new == NULL) {
         return NULL;
@@ -367,7 +158,7 @@ regions_copy(struct region *old) {
     new->executable = old->executable;
 
     if (old->next != NULL) {
-        new->next = regions_copy(old->next);
+        new->next = region_copy(old->next);
         if (new->next == NULL) {
             kfree(new);
             return NULL;
@@ -379,8 +170,124 @@ regions_copy(struct region *old) {
     return new;
 }
 
+Regions *
+regions_copy(Regions *old) {
+    Regions *new = regions_create();
+    if (new == NULL) {
+        return NULL;
+    }
+
+    new->head = region_copy(old->head);
+    if (new->head == NULL) {
+        kfree(new);
+        return NULL;
+    }
+
+    struct region *current = new->head;
+    while (current->next != NULL) {
+        current = current->next;
+    }
+    new->tail = current;
+
+    return new;
+}
+
+struct region *
+find_region(Regions *regions, vaddr_t vaddr) {
+    struct region *current_region = regions->head;
+    while (current_region != NULL) {
+        if (current_region->vbase <= vaddr && vaddr < current_region->vtop) {
+            return current_region;
+        }
+        current_region = current_region->next;
+    }
+    return NULL;
+}
+
+struct region *
+find_region_by_vbase(Regions *regions, vaddr_t vbase) {
+    struct region *current_region = regions->head;
+    while (current_region != NULL) {
+        if (current_region->vbase == vbase) {
+            return current_region;
+        }
+        current_region = current_region->next;
+    }
+    return NULL;
+}
+
+#if OPT_MMAP
+struct region *
+alloc_file_region(struct addrspace *as, size_t memsize, int readable, int writeable, int executable) {
+    size_t npages;
+
+    // calcuate how many pages we need
+    npages = (memsize + PAGE_SIZE - 1) / PAGE_SIZE;
+
+    // since this is for file map, we are going to place this right under the first free space under the stack but above the heap
+
+    // find heap first
+    struct region *heap = find_region_by_vbase(as->all_regions, as->heap_start);
+    KASSERT(heap != NULL);
+
+    // start from the stack, searching backwards
+    struct region *target = find_region_by_vbase(as->all_regions, as->stack_start);
+    KASSERT(target != NULL);
+
+    // now we have the stack, find the last region that is above the heap but is below the stack
+    while (target != NULL) {
+        if (target->vbase < heap->vtop) {
+            break;
+        }
+        target = target->prev;
+    }
+
+    // now we have the region that is above the heap but below the stack
+    target = target->prev;
+    KASSERT(target != NULL);
+
+    vaddr_t free_space_start = heap->vtop;
+    vaddr_t free_space_end = target->vbase;
+
+    // double check start and end are page aligned
+    KASSERT(free_space_start % PAGE_SIZE == 0);
+    KASSERT(free_space_end % PAGE_SIZE == 0);
+
+    // how many pages, do they fit?
+    if (npages * PAGE_SIZE > free_space_end - free_space_start) {
+        return NULL;
+    }
+
+    // if we reach here, they fit, so we alloc the region below the target
+
+    struct region *new_region = kmalloc(sizeof(struct region));
+    if (new_region == NULL) {
+        return NULL;
+    }
+
+    new_region->vbase = free_space_end - npages * PAGE_SIZE; // vbase is inclusive
+    new_region->npages = npages;
+    new_region->vtop = free_space_end; // vtop is exclusive
+    new_region->next = NULL;
+    new_region->prev = NULL;
+    new_region->readable = readable;
+    new_region->writeable = writeable;
+    new_region->executable = executable;
+    new_region->type = FILE_REGION;
+
+    // insert the new region, before the target
+    // | --- heap --- | --- new region --- | --- target --- | --- stack --- |
+    new_region->next = target;
+    new_region->prev = target->prev;
+    target->prev->next = new_region;
+    target->prev = new_region;
+
+    return new_region;
+}
+#endif
+
 static int
-regions_identical(struct region *r1, struct region *r2) {
+region_identical(struct region *r1, struct region *r2) {
     if (r1 == NULL && r2 == NULL) {
         return 1;
     }
@@ -393,13 +300,18 @@ regions_identical(struct region *r1, struct region *r2) {
         return 0;
     }
 
-    return regions_identical(r1->next, r2->next);
+    return region_identical(r1->next, r2->next);
+}
+
+static int
+regions_identical(Regions *r1, Regions *r2) {
+    return region_identical(r1->head, r2->head);
 }
 
 // sort the regions by vbase
 static void
-sort_regions(struct region *regions) {
-    struct region *current = regions;
+sort_region(struct region *region) {
+    struct region *current = region;
     struct region *next = NULL;
     while (current != NULL) {
         next = current->next;
@@ -433,6 +345,13 @@ sort_regions(struct region *regions) {
     }
 }
 
+static void
+sort_regions(Regions *regions) {
+    KASSERT(regions != NULL);
+    sort_region(regions->head);
+}
+
+// given a sorted regions list, check if there is any overlap
 static int
 regions_have_overlap(struct region *regions) {
     struct region *current = regions;
@@ -443,14 +362,6 @@ regions_have_overlap(struct region *regions) {
         current = current->next;
     }
     return 0;
-}
-
-static void
-free_region(struct region *region) {
-    if (region->next != NULL) {
-        free_region(region->next);
-    }
-    kfree(region);
 }
 
 static void
@@ -467,6 +378,7 @@ flush_tlb(void) {
 struct addrspace *
 as_create(void) {
     struct addrspace *as;
+    Regions *regions;
 
     as = kmalloc(sizeof(struct addrspace));
     if (as == NULL) {
@@ -477,11 +389,19 @@ as_create(void) {
      * Initialize as needed.
      */
 
-    as->regions = NULL;
+    regions = kmalloc(sizeof(*regions));
+    if (regions == NULL) {
+        kfree(as);
+        return NULL;
+    }
+
+    regions->head = NULL;
+    regions->tail = NULL;
     as->page_table = page_table_init();
     as->force_readwrite = 0;
     as->heap_start = 0;
     as->stack_start = 0;
+    as->all_regions = regions;
 
     return as;
 }
@@ -497,12 +417,12 @@ as_copy(struct addrspace *old, struct addrspace **ret) {
 
     (void)old;
 
-    newas->regions = regions_copy(old->regions);
-    if (newas->regions == NULL) {
+    newas->all_regions = regions_copy(old->all_regions);
+    if (newas->all_regions == NULL) {
         as_destroy(newas);
         return ENOMEM;
     }
-    KASSERT(regions_identical(old->regions, newas->regions));
+    KASSERT(regions_identical(old->all_regions, newas->all_regions));
 
     newas->page_table = page_table_copy(old->page_table);
     if (newas->page_table == NULL) {
@@ -526,8 +446,8 @@ as_destroy(struct addrspace *as) {
      * Clean up as needed.
      */
 
-    free_region(as->regions);
-    as->regions = NULL;
+    regions_destroy(as->all_regions);
+    as->all_regions = NULL;
     page_table_destroy(as->page_table);
     as->page_table = NULL;
     as->stack_start = 0;
@@ -602,7 +522,7 @@ as_define_region(struct addrspace *as, vaddr_t vaddr, size_t memsize,
      * We need to create a new region and add it to the regions list of the address space.
      */
 
-    struct region *new_region = kmalloc(sizeof(struct region));
+    struct region *new_region = kmalloc(sizeof(*new_region));
     if (new_region == NULL) {
         return ENOMEM;
     }
@@ -611,25 +531,13 @@ as_define_region(struct addrspace *as, vaddr_t vaddr, size_t memsize,
     new_region->npages = npages;
     new_region->vtop = vaddr + npages * PAGE_SIZE; // vtop is exclusive
     new_region->next = NULL;
+    new_region->prev = NULL;
     new_region->readable = readable == PF_R;
     new_region->writeable = writeable == PF_W;
     new_region->executable = executable == PF_X;
+    new_region->type = UNNAMED_REGION;
 
-    if (as->regions == NULL) {
-        as->regions = new_region;
-    } else {
-        struct region *current = as->regions;
-        while (current->next != NULL) {
-            // meanwhile we would like to sanity check if the regions overlap
-            if (MAX(current->vbase, new_region->vbase) < MIN(current->vtop, new_region->vtop)) {
-                // regions overlap, bad ELF region definitions
-                kfree(new_region);
-                return EINVAL;
-            }
-            current = current->next;
-        }
-        current->next = new_region;
-    }
+    regions_insert(as->all_regions, new_region);
 
     return 0;
 }
@@ -641,7 +549,7 @@ as_prepare_load(struct addrspace *as) {
      */
 
     KASSERT(as != NULL);
-    KASSERT(as->regions != NULL);
+    KASSERT(as->all_regions != NULL);
 
     as->force_readwrite = 1;
 
@@ -655,7 +563,8 @@ as_complete_load(struct addrspace *as) {
      */
 
     KASSERT(as != NULL);
-    KASSERT(as->regions != NULL);
+    KASSERT(as->all_regions != NULL);
+    KASSERT(as->all_regions->head != NULL);
 
     as->force_readwrite = 0;
 
@@ -674,7 +583,7 @@ as_define_stack(struct addrspace *as, vaddr_t *stackptr) {
     // Heap region is read/write and not executable
     // we find the top of the top most region and add heap region after that and just below the stack
 
-    struct region *current = as->regions;
+    struct region *current = as->all_regions->head;
 
     struct region *topmost = current;
     while (current != NULL) {
@@ -696,33 +605,23 @@ as_define_stack(struct addrspace *as, vaddr_t *stackptr) {
     // Stack region is read/write and not executable
     as_define_region(as, USERSTACK - YANG_VM_STACKPAGES * PAGE_SIZE, YANG_VM_STACKPAGES * PAGE_SIZE, PF_R, PF_W, 0);
 
-    sort_regions(as->regions);
+    sort_regions(as->all_regions);
     // check that there is no overlap
-    KASSERT(!regions_have_overlap(as->regions));
+    KASSERT(!regions_have_overlap(as->all_regions->head));
 
     // now keep a reference to the heap region for convenience
     as->heap_start = heap_base;
-    struct region *heap = find_region(as, heap_base);
+    struct region *heap = find_region_by_vbase(as->all_regions, heap_base);
+    heap->type = HEAP_REGION;
     KASSERT(heap != NULL);
     KASSERT(heap->vbase == as->heap_start);
 
     // keep a reference to the stack region for convenience
     as->stack_start = USERSTACK - YANG_VM_STACKPAGES * PAGE_SIZE;
-    struct region *stack = find_region(as, USERSTACK - YANG_VM_STACKPAGES * PAGE_SIZE);
+    struct region *stack = find_region_by_vbase(as->all_regions, USERSTACK - YANG_VM_STACKPAGES * PAGE_SIZE);
+    stack->type = STACK_REGION;
     KASSERT(stack != NULL);
     KASSERT(stack->vbase == as->stack_start);
 
     return 0;
-}
-
-struct region *
-find_region(struct addrspace *as, vaddr_t vaddr) {
-    struct region *current_region = as->regions;
-    while (current_region != NULL) {
-        if (current_region->vbase <= vaddr && vaddr < current_region->vtop) {
-            return current_region;
-        }
-        current_region = current_region->next;
-    }
-    return NULL;
 }
