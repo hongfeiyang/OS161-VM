@@ -147,7 +147,6 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
             }
         }
 #endif
-
         load_tlb(faultaddress, paddr, as->force_readwrite);
         return 0;
     }
@@ -191,7 +190,12 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
         return ENOSYS;
     }
 
+#if OPT_MMAP
     if (current_region->type == FILE_REGION) {
+        // if we reach here, it means that the page table does not have a pte
+        // and we are in a file region. If this is a read fault, we need to read from the file
+        // for write fault, we need to write to the file and make sure the page is also updated in the page table
+
         // read the file
         int fd = current_region->fd;
         off_t offset = current_region->offset;
@@ -215,6 +219,7 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
             uio_kinit(&iov, &u, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE, offset, UIO_READ);
             result = VOP_READ(file->of_vnode, &u);
         } else if (faulttype == VM_FAULT_WRITE) {
+            // TODO: how to handle write fault in a file region?
             uio_kinit(&iov, &u, (void *)PADDR_TO_KVADDR(paddr), PAGE_SIZE, offset, UIO_WRITE);
             result = VOP_WRITE(file->of_vnode, &u);
         }
@@ -223,6 +228,8 @@ vm_fault(int faulttype, vaddr_t faultaddress) {
             return result;
         }
     }
+
+#endif
 
     // Add the new page table entry to the page table
     int result = page_table_add_entry(pt, faultaddress, new_entry);
