@@ -33,9 +33,6 @@
 #include <cdefs.h> /* for __DEAD */
 struct trapframe;  /* from <machine/trapframe.h> */
 
-#define PROT_READ 1
-#define PROT_WRITE 2
-
 /*
  * The system call dispatcher.
  */

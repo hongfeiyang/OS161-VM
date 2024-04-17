@@ -17,6 +17,8 @@
 #include <filetable.h>
 #include <syscall.h>
 #include <addrspace.h>
+#include <kern/unistd.h>
+
 /*
  * sbrk()
  * If successful, sbrk() returns the previous break value.

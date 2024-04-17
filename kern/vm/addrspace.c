@@ -39,6 +39,7 @@
 #include <proc.h>
 #include <elf.h>
 #include <synch.h>
+#include <kern/unistd.h>
 
 /*
  * Note! If OPT_DUMBVM is set, as is the case until you start the VM
@@ -270,9 +271,9 @@ alloc_file_region(struct addrspace *as, size_t memsize, int readable, int writea
     new_region->vtop = free_space_end; // vtop is exclusive
     new_region->next = NULL;
     new_region->prev = NULL;
-    new_region->readable = readable;
-    new_region->writeable = writeable;
-    new_region->executable = executable;
+    new_region->readable = readable == PROT_READ;
+    new_region->writeable = writeable == PROT_WRITE;
+    new_region->executable = executable & 0; // we do not allow executable file mapping
     new_region->type = FILE_REGION;
 
     // insert the new region, before the target

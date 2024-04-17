@@ -31,9 +31,11 @@
 #define _KERN_UNISTD_H_
 
 /* Constants for read/write/etc: special file handles */
-#define STDIN_FILENO  0      /* Standard input */
-#define STDOUT_FILENO 1      /* Standard output */
-#define STDERR_FILENO 2      /* Standard error */
+#define STDIN_FILENO 0  /* Standard input */
+#define STDOUT_FILENO 1 /* Standard output */
+#define STDERR_FILENO 2 /* Standard error */
 
+#define PROT_READ 1
+#define PROT_WRITE 2
 
 #endif /* _KERN_UNISTD_H_ */
