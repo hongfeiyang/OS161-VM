@@ -12,79 +12,6 @@
 #include <elf.h>
 #include <synch.h>
 
-PTE *
-page_table_lookup(PageTable *page_table, vaddr_t vaddr) {
-
-    KASSERT(page_table != NULL);
-    KASSERT(page_table->lock != NULL);
-
-    int l1_index = L1_INDEX(vaddr);
-    int l2_index = L2_INDEX(vaddr);
-
-    lock_acquire(page_table->lock);
-
-    if (page_table->tables[l1_index] == NULL) {
-        lock_release(page_table->lock);
-        return NULL;
-    }
-
-    PTE *entry = page_table->tables[l1_index]->entries[l2_index];
-
-    lock_release(page_table->lock);
-    return entry;
-}
-
-int
-page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte) {
-
-    KASSERT(pte != NULL);
-    KASSERT(page_table != NULL);
-    KASSERT(page_table->lock != NULL);
-
-    int l1_index = L1_INDEX(vaddr);
-    int l2_index = L2_INDEX(vaddr);
-
-    lock_acquire(page_table->lock);
-
-    if (page_table->tables[l1_index] == NULL) {
-        page_table->tables[l1_index] = kmalloc(sizeof(L2Table));
-        if (page_table->tables[l1_index] == NULL) {
-            lock_release(page_table->lock);
-            return ENOMEM;
-        }
-        for (int i = 0; i < 1 << L2_BITS; i++) {
-            page_table->tables[l1_index]->entries[i] = NULL;
-        }
-    }
-    // Potentially we can have a reference here to some PTE in other page tables
-    // so here we might replace it with a real page with ref count 1
-    page_table->tables[l1_index]->entries[l2_index] = pte;
-
-    lock_release(page_table->lock);
-
-    return 0;
-}
-
-PTE *
-page_table_remove_entry(PageTable *page_table, vaddr_t vaddr) {
-    int l1_index = L1_INDEX(vaddr);
-    int l2_index = L2_INDEX(vaddr);
-
-    lock_acquire(page_table->lock);
-
-    if (page_table->tables[l1_index] == NULL) {
-        lock_release(page_table->lock);
-        return NULL;
-    }
-
-    PTE *entry = page_table->tables[l1_index]->entries[l2_index];
-    page_table->tables[l1_index]->entries[l2_index] = NULL;
-
-    lock_release(page_table->lock);
-
-    return entry;
-}
-
 void
 pte_destroy(PTE *pte) {
     KASSERT(pte != NULL);
@@ -97,6 +24,7 @@ pte_destroy(PTE *pte) {
     lock_acquire(lock);
     paddr_t frame = pte->frame;
     vaddr_t page = PADDR_TO_KVADDR(frame & PAGE_FRAME);
+    bzero((void *)page, PAGE_SIZE);
     free_kpages(page);
     pte->frame = 0;
 #if OPT_COW
@@ -238,6 +166,92 @@ pte_copy(PTE *pte) {
     return new;
 }
 
+static L2Table *
+l2_table_init(void) {
+    L2Table *l2_table = kmalloc(sizeof(L2Table));
+    if (l2_table == NULL) {
+        return NULL;
+    }
+
+    l2_table->count = 0;
+    for (int i = 0; i < 1 << L2_BITS; i++) {
+        l2_table->entries[i] = NULL;
+    }
+
+    return l2_table;
+}
+
+static void
+l2_table_destroy(L2Table *l2_table) {
+    KASSERT(l2_table != NULL);
+
+    for (int i = 0; i < 1 << L2_BITS; i++) {
+        if (l2_table->entries[i] != NULL) {
+#if OPT_COW
+            // decrement ref_count and free the frame if ref_count is 1
+            PTE *pte = l2_table->entries[i];
+            KASSERT(pte->lock != NULL);
+            lock_acquire(pte->lock);
+            KASSERT(pte->ref_count > 0);
+            if (pte->ref_count > 1) {
+                pte->ref_count--;
+                lock_release(pte->lock);
+            } else {
+                lock_release(pte->lock);
+                pte_destroy(pte);
+            }
+#else
+            pte_destroy(l2_table->entries[i]);
+#endif
+            l2_table->entries[i] = NULL;
+            l2_table->count--;
+        }
+    }
+    KASSERT(l2_table->count == 0);
+    kfree(l2_table);
+}
+
+// L2Table copy
+static L2Table *
+l2_table_copy(L2Table *old) {
+
+    KASSERT(old != NULL);
+
+    L2Table *new = l2_table_init();
+    if (new == NULL) {
+        return NULL;
+    }
+
+    for (int i = 0; i < 1 << L2_BITS; i++) {
+        if (old->entries[i] != NULL) {
+#if OPT_COW
+            PTE *existing = old->entries[i];
+            if (existing->shared) {
+                pte_inc_ref(old->entries[i]);
+                new->entries[i] = old->entries[i];
+            } else {
+                PTE *new_entry = pte_copy(old->entries[i]);
+                if (new_entry == NULL) {
+                    l2_table_destroy(new);
+                    return NULL;
+                }
+                new->entries[i] = new_entry;
+            }
+#else
+            new->entries[i] = pte_copy(old->entries[i]);
+            if (new->entries[i] == NULL) {
+                l2_table_destroy(new);
+                return NULL;
+            }
+#endif
+            new->count++;
+        }
+    }
+
+    KASSERT(new->count == old->count);
+    return new;
+}
+
 PageTable *
 page_table_init(void) {
     PageTable *page_table = kmalloc(sizeof(PageTable));
@@ -271,17 +285,7 @@ page_table_destroy(PageTable *page_table) {
 
     for (int i = 0; i < 1 << L1_BITS; i++) {
         if (page_table->tables[i] != NULL) {
-            for (int j = 0; j < 1 << L2_BITS; j++) {
-                if (page_table->tables[i]->entries[j] != NULL) {
-#if OPT_COW
-                    // decrement ref_count and free the frame if ref_count is 1
-                    pte_dec_ref(page_table->tables[i]->entries[j]);
-#else
-                    pte_destroy(page_table->tables[i]->entries[j]);
-#endif
-                }
-            }
-            kfree(page_table->tables[i]);
+            l2_table_destroy(page_table->tables[i]);
             page_table->tables[i] = NULL;
         }
     }
@@ -302,44 +306,96 @@ page_table_copy(PageTable *old) {
     lock_acquire(old->lock);
     for (int i = 0; i < 1 << L1_BITS; i++) {
         if (old->tables[i] != NULL) {
-            new->tables[i] = kmalloc(sizeof(*new->tables[i]));
-            if (new->tables[i] == NULL) {
-                lock_release(old->lock);
+            L2Table *l2_table = l2_table_copy(old->tables[i]);
+            if (l2_table == NULL) {
                 page_table_destroy(new);
+                lock_release(old->lock);
                 return NULL;
             }
-
-            for (int j = 0; j < 1 << L2_BITS; j++) {
-                if (old->tables[i]->entries[j] != NULL) {
-#if OPT_COW
-                    PTE *existing = old->tables[i]->entries[j];
-                    if (existing->shared) {
-                        pte_inc_ref(old->tables[i]->entries[j]);
-                        new->tables[i]->entries[j] = old->tables[i]->entries[j];
-                    } else {
-                        PTE *new_entry = pte_copy(old->tables[i]->entries[j]);
-                        if (new_entry == NULL) {
-                            lock_release(old->lock);
-                            page_table_destroy(new);
-                            return NULL;
-                        }
-                        new->tables[i]->entries[j] = new_entry;
-                    }
-#else
-                    new->tables[i]->entries[j] = pte_copy(old->tables[i]->entries[j]);
-                    if (new->tables[i]->entries[j] == NULL) {
-                        lock_release(old->lock);
-                        page_table_destroy(new);
-                        return NULL;
-                    }
-#endif
-                } else {
-                    new->tables[i]->entries[j] = NULL;
-                }
-            }
+            new->tables[i] = l2_table;
         }
     }
     lock_release(old->lock);
 
     return new;
+}
+
+PTE *
+page_table_lookup(PageTable *page_table, vaddr_t vaddr) {
+
+    KASSERT(page_table != NULL);
+    KASSERT(page_table->lock != NULL);
+
+    int l1_index = L1_INDEX(vaddr);
+    int l2_index = L2_INDEX(vaddr);
+
+    lock_acquire(page_table->lock);
+
+    if (page_table->tables[l1_index] == NULL) {
+        lock_release(page_table->lock);
+        return NULL;
+    }
+
+    PTE *entry = page_table->tables[l1_index]->entries[l2_index];
+
+    lock_release(page_table->lock);
+    return entry;
+}
+
+int
+page_table_add_entry(PageTable *page_table, vaddr_t vaddr, PTE *pte) {
+
+    KASSERT(pte != NULL);
+    KASSERT(page_table != NULL);
+    KASSERT(page_table->lock != NULL);
+
+    int l1_index = L1_INDEX(vaddr);
+    int l2_index = L2_INDEX(vaddr);
+
+    lock_acquire(page_table->lock);
+
+    if (page_table->tables[l1_index] == NULL) {
+        page_table->tables[l1_index] = l2_table_init();
+        if (page_table->tables[l1_index] == NULL) {
+            lock_release(page_table->lock);
+            return ENOMEM;
+        }
+    }
+
+    // Potentially here we can already have a page table entry
+    // if that is the case then it means we are doing a copy on write
+    if (page_table->tables[l1_index]->entries[l2_index] == NULL) {
+        page_table->tables[l1_index]->count++;
+    }
+    page_table->tables[l1_index]->entries[l2_index] = pte;
+
+    lock_release(page_table->lock);
+
+    return 0;
+}
+
+PTE *
+page_table_remove_entry(PageTable *page_table, vaddr_t vaddr) {
+    int l1_index = L1_INDEX(vaddr);
+    int l2_index = L2_INDEX(vaddr);
+
+    lock_acquire(page_table->lock);
+
+    if (page_table->tables[l1_index] == NULL) {
+        lock_release(page_table->lock);
+        return NULL;
+    }
+
+    PTE *entry = page_table->tables[l1_index]->entries[l2_index];
+    page_table->tables[l1_index]->entries[l2_index] = NULL;
+    page_table->tables[l1_index]->count--;
+
+    if (page_table->tables[l1_index]->count == 0) {
+        kfree(page_table->tables[l1_index]);
+        page_table->tables[l1_index] = NULL;
+    }
+
+    lock_release(page_table->lock);
+
+    return entry;
 }

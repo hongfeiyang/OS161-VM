@@ -95,6 +95,7 @@ typedef struct page_table_entry {
 
 typedef struct l2_page_table {
     PTE *entries[1 << L2_BITS];
+    int count;
 } L2Table;
 // A second-level page table has 1 << 9 = 512 entries
 // Each entry is 4 bytes, so 512 * 4 = 2KB

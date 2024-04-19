@@ -537,6 +537,10 @@ as_define_region(struct addrspace *as, vaddr_t vaddr, size_t memsize,
     new_region->writeable = writeable == PF_W;
     new_region->executable = executable == PF_X;
     new_region->type = UNNAMED_REGION;
+#if OPT_MMAP
+    new_region->fd = -1;
+    new_region->offset = 0;
+#endif
 
     regions_insert(as->all_regions, new_region);
 
